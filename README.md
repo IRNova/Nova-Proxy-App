@@ -1,24 +1,4 @@
-<div align="center" dir="rtl">
-
-<p align="center">
-  <img src="https://img.shields.io/badge/Windows-نوا_پروکسی-0078D6?style=for-the-badge&logo=windows&logoColor=white" alt="Windows">
-  <img src="https://img.shields.io/badge/Go-1.25+-00ADD8?style=for-the-badge&logo=go&logoColor=white" alt="Go Version">
-  <img src="https://img.shields.io/badge/Node.js-24+-339933?style=for-the-badge&logo=nodedotjs&logoColor=white" alt="Node.js">
-  <img src="https://img.shields.io/badge/License-MIT-green?style=for-the-badge" alt="License">
-</p>
-
-<p align="center">
-  <img src="https://img.shields.io/badge/نسخه-0.1.0-0ea5e9?style=for-the-badge" alt="Version">
-  <img src="https://img.shields.io/badge/آخرین_آپدیت-فروردین_1405-8b5cf6?style=for-the-badge" alt="Last Update">
-  <a href="https://github.com/jhonsmithsamsmith/SniShaper/stargazers">
-    <img src="https://img.shields.io/github/stars/jhonsmithsamsmith/SniShaper?style=for-the-badge&color=0ea5e9" alt="Stars">
-  </a>
-  <a href="https://github.com/jhonsmithsamsmith/SniShaper/issues">
-    <img src="https://img.shields.io/github/issues/jhonsmithsamsmith/SniShaper?style=for-the-badge&color=8b5cf6" alt="Issues">
-  </a>
-</p>
-
----
+<div dir="rtl" align="right">
 
 ## ✨ درباره پروژه
 
@@ -164,17 +144,7 @@
 
 ### نصب روی VPS شخصی
 اسکریپت نصب یک‌خطی برای اوبونتو/دبیان:
+
 ```bash
-curl -fsSL https://raw.githubusercontent.com/coolapijust/snishaper/main/sni-server/install.sh | sudo bash
-
-پیکربندی در نوا پروکسی
-در زبانه «Server Node» سمت چپ، اطلاعات Server Hostname و Auth Secret را وارد کنید.
-
-در تنظیمات قانون، «حالت عملیات» گروه هدف را به Server Node تغییر دهید.
-
-مزیت اصلی این حالت، عدم وجود ویژگی‌های پروکسی سنتی و پنهان‌سازی ترافیک به صورت عادی HTTPS است.
-
-
-📞 ارتباط
-<p align="center"> <a href="https://github.com/jhonsmithsamsmith/SniShaper"> <img src="https://img.shields.io/badge/GitHub-گیتهاب-0ea5e9?style=for-the-badge&logo=github" alt="GitHub"> </a> <a href="https://github.com/coolapijust/snishaper/wiki"> <img src="https://img.shields.io/badge/Wiki-مستندات-8b5cf6?style=for-the-badge" alt="Wiki"> </a> </p>
-<p align="center"> <strong>نسخه 0.1.0 - در حال توسعه | با ❤️ برای جامعه اوپن سورس</strong> </p></div> ```
+curl -fsSL https://raw.githubusercontent.com/IRNova/Nova-Proxy-App/main/sni-server/install.sh | sudo bash
+```bash
