@@ -147,4 +147,3 @@
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/IRNova/Nova-Proxy-App/main/sni-server/install.sh | sudo bash
-```bash
