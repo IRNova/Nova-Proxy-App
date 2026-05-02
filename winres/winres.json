@@ -1,0 +1,42 @@
+{
+  "RT_GROUP_ICON": {
+    "APP": {
+      "0000": "../build/windows/icon.ico"
+    }
+  },
+  "RT_MANIFEST": {
+    "#1": {
+      "0409": {
+        "description": "NovaProxy",
+        "minimum-os": "win10",
+        "execution-level": "as invoker",
+        "dpi-awareness": "per monitor v2",
+        "long-path-aware": true,
+        "use-common-controls-v6": true
+      }
+    }
+  },
+  "RT_VERSION": {
+    "#1": {
+      "0000": {
+        "fixed": {
+          "file_version": "0.0.0.0",
+          "product_version": "0.0.0.0"
+        },
+        "info": {
+          "0409": {
+            "Comments": "NovaProxy desktop application",
+            "CompanyName": "NovaProxy Project",
+            "FileDescription": "NovaProxy",
+            "FileVersion": "0.0.0.0",
+            "InternalName": "novaproxy",
+            "LegalCopyright": "Copyright (c) NovaProxy Project",
+            "OriginalFilename": "novaproxy.exe",
+            "ProductName": "NovaProxy",
+            "ProductVersion": "0.0.0.0"
+          }
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,78 @@
+# Build outputs
+build/bin/
+*.exe
+!proxy/usque.exe
+*.dll
+*.msi
+*.syso
+!novaproxy.syso
+
+# Go cache / temp
+.gocache/
+*.test
+
+# Frontend deps and build artifacts
+node_modules/
+frontend/node_modules/
+frontend/dist/
+frontend/wailsjs/
+
+# Runtime generated data
+warp/config.json
+build/bin/warp/config.json
+# Go code - keep these files
+!cert/cert.go
+!cert/exec_windows.go
+
+# Runtime generated certificates
+cert/*.crt
+cert/*.key
+cert/*.pem
+*.log
+/config.json
+diag_report_*.json
+
+# Local temp / backups
+*.bak
+*.bak.*
+rules/*.bak*
+rules/*.generated.json
+rules/*.manual.json
+rules/*.rejected.json
+rules/*.v2.json
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Custom ignores
+doc/
+shaper-next/
+novaproxy.zip
+
+# Custom ignores - added for mitmverify and cmd
+mitmverify.exe
+mitmverify-report.json
+cmd/
+cmd/h3check/
+cmd/quic-poc/
+WinDivert.dll
+WinDivert64.sys
+WinDivert32.sys
+WinDivert*.sys
+scripts/
+third_party/windivert-cache/
+wiki_repo/
+
+novaproxy
+
+sniproxy-tls-rf/
+
+# Core / TUN runtime data
+runtime/
+core/mihomo/
+config/system_proxy_owner.json
+build/bin/markers/
+/.workbuddy/
