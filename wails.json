@@ -1,0 +1,15 @@
+{
+  "$schema": "https://wails.io/schemas/config.v2.json",
+  "name": "novaproxy",
+  "outputfilename": "novaproxy",
+  "frontend:install": "npm install",
+  "frontend:build": "npm run build",
+  "frontend:dev:watcher": "npm run dev",
+  "frontend:dev:serverUrl": "auto",
+  "devtools": true,
+  "note": "legacy v2 config only; current v3 build path is frontend npm build + go build",
+  "author": {
+    "name": "gamelatest",
+    "email": "gamelatest@example.com"
+  }
+}
