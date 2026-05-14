@@ -246,7 +246,7 @@ const WORKER_URL = "my-nova-relay.yourname.workers.dev";
 ۴. دو خط زیر را پیدا کنید:
 ```js
 const AUTH_KEY = "Novaproxy";
-const WORKER_URL = "https://nova3.altramax083.workers.dev";
+const WORKER_URL = "https://my-nova-relay.yourname.workers.dev";
 ```
 ۵. تغییر دهید:
    - `AUTH_KEY` ← یک رمز دلخواه قوی (مثلاً `mY$tr0nGK3y2024x`)
