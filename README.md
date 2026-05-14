@@ -322,9 +322,33 @@ const WORKER_URL = "https://my-nova-relay.yourname.workers.dev";
 
 ## قدردانی
 
-بخش **GSA** این پروژه بر پایه نسخه اولیه [mhr-cfw-go](https://github.com/denuitt1/mhr-cfw-go) ساخته شده است. از این پروژه به عنوان نقطه شروع برای هسته رله Google Apps Script استفاده شده، اما پس از آن ارتقاهای اساسی شامل HTTP/2 multiplexing، connection pooling، request batching، caching، coalescing، auto-failover، SNI rotation، CORS support، content decoding، و ده‌ها قابلیت دیگر به آن اضافه شده است.
+بخش **GSA** این پروژه بر پایه نسخه اولیه [mhr-cfw-go](https://github.com/denuitt1/mhr-cfw-go) ساخته شده است. از این پروژه به عنوان نقطه شروع برای هسته رله Google Apps Script استفاده شده، اما پس از آن ارتقاهای اساسی پیدا کرده و کلی قابلیت به آن اضافه شده است.
 
-فرانت‌اند (بخش UI) این پروژه از فرانت‌اند پروژه [SniShaper](https://github.com/SniShaper/SniShaper) گرفته شده است. از تیم SniShaper بابت ارائه این فرانت‌اند تشکر می‌شود. توجه داشته باشید که **SniShaper** برای دور زدن محدودیت‌های اینترنت چین (GFW) طراحی شده و معماری، هسته MITM و هسته GSA پروژه Nova هیچ ارتباط کدبیس یا وابستگی با آن پروژه ندارند. NovaProxy به طور خاص برای رفع محدودیت‌های اینترنت ایران توسعه یافته است.
+از [denuitt1](https://github.com/denuitt1) بابت ارائه این پروژه تشکر می‌شود.
+
+فرانت‌اند (بخش UI) این پروژه از فرانت‌اند پروژه [SniShaper](https://github.com/SniShaper/SniShaper) گرفته شده است. توجه داشته باشید که **SniShaper** برای دور زدن محدودیت‌های اینترنت چین (GFW) طراحی شده و معماری، هسته MITM و هسته GSA پروژه Nova هیچ ارتباط کدبیس یا وابستگی با آن پروژه ندارند. NovaProxy به طور خاص برای رفع محدودیت‌های اینترنت ایران توسعه یافته است.
+
+از [SniShaper](https://github.com/SniShaper) بابت ارائه این فرانت‌اند تشکر می‌شود.
+
+### مقایسه SniShaper و NovaProxy
+
+| شاخص | SniShaper | نوا پروکسی (Nova-Proxy-App) |
+|------|-----------|---------------------------|
+| **زبان اصلی** | Go 87%, TypeScript | Go, TypeScript (Wails v3) |
+| **ستاره‌ها (Stars)** | 72 | 34 (تا زمان بررسی) |
+| **آخرین بروزرسانی** | ۴ می ۲۰۲۶ (v1.26) | ۲ می ۲۰۲۶ (V1.0) |
+| **سیستم‌عامل پشتیبانی** | ویندوز، لینوکس (نسخه جداگانه) | ویندوز، مک، لینوکس |
+| **پشتیبانی از TUN Mode** | خیر | بله |
+| **پشتیبانی از Google Apps Script** | خیر | بله (GSA Relay) |
+| **تکنیک اصلی Bypass** | دستکاری ClientHello | MITM + Domain Fronting (GSA) |
+
+### تفاوت‌های کلیدی (منحصربه‌فرد بودن Nova)
+
+Nova تنها یک کپی ساده نیست و قابلیت‌های پیشرفته‌ای دارد که در SniShaper دیده نمی‌شود:
+
+- **موتور GSA (Google Apps Script):** مهم‌ترین تفاوت، وجود این موتور است که ترافیک را از طریق سرورهای گوگل رله می‌کند. SniShaper چنین قابلیتی ندارد.
+- **اپتیمایزیشن اختصاصی:** Nova به طور ویژه برای عبور از فیلترینگ ایران بهینه‌سازی شده و از Pool آیپی‌های کلودفلر و WARP Masque پشتیبانی می‌کند.
+- **حالت TUN:** حالت TUN در Nova به شما اجازه می‌دهد کل ترافیک سیستمعامل را بدون تنظیم دستی مدیریت کنید، در حالی که SniShaper چنین قابلیتی ندارد.
 
 ---
 
@@ -654,9 +678,33 @@ Now you can browse any site — even **Telegram Web** works perfectly.
 
 ## Acknowledgments
 
-The **GSA** section of this project is based on the initial version of [mhr-cfw-go](https://github.com/denuitt1/mhr-cfw-go). This project was used as a starting point for the Google Apps Script relay core, but has since been significantly upgraded with HTTP/2 multiplexing, connection pooling, request batching, caching, coalescing, auto-failover, SNI rotation, CORS support, content decoding, and dozens of other features.
+The **GSA** section of this project is based on the initial version of [mhr-cfw-go](https://github.com/denuitt1/mhr-cfw-go). This project was used as a starting point for the Google Apps Script relay core, but has since been significantly upgraded with many new features.
 
-The frontend (UI) of this project is taken from the [SniShaper](https://github.com/SniShaper/SniShaper) project. Thanks to the SniShaper team for providing this frontend. Note that **SniShaper** is designed to bypass China's internet restrictions (GFW), and the MITM and GSA cores of Nova have no codebase relationship or dependency on that project. NovaProxy is specifically developed to bypass internet restrictions in Iran.
+Thanks to [denuitt1](https://github.com/denuitt1) for providing this project.
+
+The frontend (UI) of this project is taken from the [SniShaper](https://github.com/SniShaper/SniShaper) project. Note that **SniShaper** is designed to bypass China's internet restrictions (GFW), and the MITM and GSA cores of Nova have no codebase relationship or dependency on that project. NovaProxy is specifically developed to bypass internet restrictions in Iran.
+
+Thanks to [SniShaper](https://github.com/SniShaper) for providing this frontend.
+
+### SniShaper vs NovaProxy Comparison
+
+| Metric | SniShaper | Nova-Proxy-App |
+|--------|-----------|----------------|
+| **Language** | Go 87%, TypeScript | Go, TypeScript (Wails v3) |
+| **Stars** | 72 | 34 (at time of writing) |
+| **Last Update** | May 4, 2026 (v1.26) | May 2, 2026 (V1.0) |
+| **Supported OS** | Windows, Linux (separate builds) | Windows, macOS, Linux |
+| **TUN Mode** | No | Yes |
+| **Google Apps Script** | No | Yes (GSA Relay) |
+| **Main Bypass Technique** | ClientHello manipulation | MITM + Domain Fronting (GSA) |
+
+### Key Differences (What Makes Nova Unique)
+
+Nova is not just a simple copy — it has advanced features not found in SniShaper:
+
+- **GSA Engine (Google Apps Script):** The most important difference — relays traffic through Google's servers. SniShaper does not have this capability.
+- **Custom Optimization:** Nova is specifically optimized for bypassing Iran's internet restrictions, with Cloudflare IP Pool and WARP Masque support.
+- **TUN Mode:** Nova's TUN mode allows managing all OS traffic without manual configuration, unlike SniShaper.
 
 ---
 
