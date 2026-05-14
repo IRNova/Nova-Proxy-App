@@ -9,7 +9,7 @@ import (
 	"sync"
 	"time"
 
-	"golang.org/x/net/proxy"
+
 )
 
 // AutoRoutingMode defines the auto-routing preset.
@@ -18,8 +18,8 @@ type AutoRoutingMode string
 const (
 	AutoRoutingOff            AutoRoutingMode = ""
 	AutoRoutingDefault        AutoRoutingMode = "default" // ECH / TLS-RF / direct
-	AutoRoutingWarpFallback   AutoRoutingMode = "warp"    // + Warp fallback
 	AutoRoutingServerFallback AutoRoutingMode = "server"  // + Server fallback
+	AutoRoutingGSA            AutoRoutingMode = "gsa"     // + GSA domain fronting
 )
 
 // AutoRoutingConfig is persisted in settings.json.
@@ -46,7 +46,7 @@ type AutoRouter struct {
 	cfNets      []*net.IPNet
 	cfCache     map[string]cfCacheEntry
 	cfCacheMu   sync.RWMutex
-	dohResolver *DoHResolver
+	dohResolver *FailoverResolver
 }
 
 type cfCacheEntry struct {
@@ -56,7 +56,7 @@ type cfCacheEntry struct {
 
 const cfCacheTTL = 30 * time.Minute
 
-func NewAutoRouter(config AutoRoutingConfig, dohResolver *DoHResolver) *AutoRouter {
+func NewAutoRouter(config AutoRoutingConfig, dohResolver *FailoverResolver) *AutoRouter {
 	ar := &AutoRouter{
 		config:      config,
 		gfwList:     NewGFWList(),
@@ -125,11 +125,15 @@ func (ar *AutoRouter) IsCloudflare(host string) bool {
 	return isCF
 }
 
-// Decide returns a synthetic Rule for a GFWList-matched domain.
-// Returns a "direct" rule if the domain is not in the GFW list.
+// Decide returns a synthetic Rule for a host not covered by manual rules.
 func (ar *AutoRouter) Decide(host string) Rule {
 	if ar.config.Mode == AutoRoutingOff || ar.config.Mode == "" {
 		return Rule{Mode: "direct", Enabled: true}
+	}
+
+	// GSA mode: all traffic through GSA tunnel, no GFW list needed
+	if ar.config.Mode == AutoRoutingGSA {
+		return Rule{Mode: "gsa", Enabled: true, AutoRouted: true}
 	}
 
 	if !ar.gfwList.IsBlocked(host) {
@@ -156,10 +160,7 @@ func (ar *AutoRouter) Decide(host string) Rule {
 		Enabled:    true,
 		AutoRouted: true,
 	}
-	switch ar.config.Mode {
-	case AutoRoutingWarpFallback:
-		rule.FallbackMode = "warp"
-	case AutoRoutingServerFallback:
+	if ar.config.Mode == AutoRoutingServerFallback {
 		rule.FallbackMode = "server"
 	}
 	return rule
@@ -197,19 +198,8 @@ func (ar *AutoRouter) GetStatus() GFWListStatus {
 }
 
 // DialFallback dials targetAddr through the specified fallback transport.
-func DialFallback(fallbackMode string, targetAddr string, warpMgr *WarpManager, cfConfig CloudflareConfig, serverHost string) (net.Conn, error) {
+func DialFallback(fallbackMode string, targetAddr string, serverHost string) (net.Conn, error) {
 	switch fallbackMode {
-	case "warp":
-		if warpMgr == nil || !warpMgr.GetStatus().Running {
-			return nil, fmt.Errorf("warp not running")
-		}
-		warpAddr := fmt.Sprintf("127.0.0.1:%d", warpMgr.SocksPort)
-		dialer, err := proxy.SOCKS5("tcp", warpAddr, nil, proxy.Direct)
-		if err != nil {
-			return nil, fmt.Errorf("warp SOCKS5 dial: %w", err)
-		}
-		return dialer.Dial("tcp", targetAddr)
-
 	case "server":
 		if serverHost == "" {
 			return nil, fmt.Errorf("server host not configured")

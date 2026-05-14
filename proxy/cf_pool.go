@@ -28,6 +28,7 @@ type CloudflarePool struct {
 	mu        sync.RWMutex
 	stopChan  chan struct{}
 	running   bool
+	wg        sync.WaitGroup // Track goroutine lifecycle
 }
 
 func NewCloudflarePool(ips []string) *CloudflarePool {
@@ -50,7 +51,11 @@ func (p *CloudflarePool) Start() {
 	p.stopChan = make(chan struct{})
 	p.mu.Unlock()
 
-	go p.healthCheckLoop()
+	p.wg.Add(1)
+	go func() {
+		defer p.wg.Done()
+		p.healthCheckLoop()
+	}()
 }
 
 func (p *CloudflarePool) Stop() {
@@ -62,11 +67,12 @@ func (p *CloudflarePool) Stop() {
 	p.running = false
 	close(p.stopChan)
 	p.mu.Unlock()
+
+	p.wg.Wait() // Wait for goroutine to exit
 }
 
 func (p *CloudflarePool) UpdateIPs(ips []string) {
 	p.mu.Lock()
-	defer p.mu.Unlock()
 
 	newMap := make(map[string]*IPStats)
 	for _, ip := range ips {
@@ -93,9 +99,10 @@ func (p *CloudflarePool) UpdateIPs(ips []string) {
 	sort.Slice(p.activeIPs, func(i, j int) bool {
 		return p.activeIPs[i].latencyVal < p.activeIPs[j].latencyVal
 	})
-	
-	// Trigger check if we have new IPs and running? 
-    // For simplicity, let the loop handle it, or we could signal.
+	p.mu.Unlock()
+
+	// Trigger check when IP list is updated
+	go p.checkAllIPs()
 }
 
 // GetTopIPs returns up to n best IPs.
@@ -153,43 +160,36 @@ func (p *CloudflarePool) GetAllIPsWithStats() []*IPStats {
 }
 
 func (p *CloudflarePool) healthCheckLoop() {
-	// Initial check
-	// p.checkAllIPs() // Move initial check to be triggered manually or by start? 
-    // Usually start calls it.
-    go p.checkAllIPs()
+	// Initial check on startup
+	go p.checkAllIPs()
 
-	ticker := time.NewTicker(10 * time.Minute)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-p.stopChan:
-			return
-		case <-ticker.C:
-			p.checkAllIPs()
-		}
-	}
+	// Wait for stop signal - no periodic checks needed
+	// Health checks are now event-driven:
+	// - Triggered by connection failures (ReportFailure)
+	// - Triggered by IP list updates (UpdateIPs)
+	// - Triggered manually (TriggerHealthCheck)
+	<-p.stopChan
 }
 
 func (p *CloudflarePool) TriggerHealthCheck() {
-    go p.checkAllIPs()
+	go p.checkAllIPs()
 }
 
 func (p *CloudflarePool) RemoveInvalidIPs() int {
-    p.mu.Lock()
-    count := 0
-    for ip, stats := range p.allIPs {
-        if stats.Failures >= 3 {
-             delete(p.allIPs, ip)
-             count++
-        }
-    }
-    p.mu.Unlock()
-    
-    if count > 0 {
-        p.rebuildActiveIPs()
-    }
-    return count
+	p.mu.Lock()
+	count := 0
+	for ip, stats := range p.allIPs {
+		if stats.Failures >= 3 {
+			delete(p.allIPs, ip)
+			count++
+		}
+	}
+	p.mu.Unlock()
+
+	if count > 0 {
+		p.rebuildActiveIPs()
+	}
+	return count
 }
 
 func (p *CloudflarePool) ReportFailure(ip string) {
@@ -198,29 +198,40 @@ func (p *CloudflarePool) ReportFailure(ip string) {
 		stats.Failures++
 		stats.latencyVal += 1000 * time.Millisecond // Penalize latency
 		stats.Latency = stats.latencyVal.String()
+
+		// Trigger incremental check when failures reach threshold
+		if stats.Failures >= 2 {
+			go p.checkIncremental()
+		}
 	}
 	p.mu.Unlock()
 	p.rebuildActiveIPs()
 }
 
-func (p *CloudflarePool) ReportSuccess(ip string) {
-	p.mu.Lock()
-	if stats, ok := p.allIPs[ip]; ok {
-		if stats.Failures > 0 {
-			stats.Failures--
-		}
-	}
-	p.mu.Unlock()
-}
-
-func (p *CloudflarePool) checkAllIPs() {
+// checkIncremental performs health check on problematic IPs only
+func (p *CloudflarePool) checkIncremental() {
 	p.mu.RLock()
-	ipsToCheck := make([]string, 0, len(p.allIPs))
-	for ip := range p.allIPs {
-		ipsToCheck = append(ipsToCheck, ip)
+	ipsToCheck := make([]string, 0)
+	now := time.Now()
+
+	for ip, stats := range p.allIPs {
+		// Check IPs with failures >= 2 or not checked in 30 minutes
+		if stats.Failures >= 2 ||
+			now.Sub(stats.lastCheckTime) > 30*time.Minute {
+			ipsToCheck = append(ipsToCheck, ip)
+		}
 	}
 	p.mu.RUnlock()
 
+	if len(ipsToCheck) == 0 {
+		return
+	}
+
+	p.checkIPs(ipsToCheck)
+}
+
+// checkIPs performs health check on specified IPs
+func (p *CloudflarePool) checkIPs(ipsToCheck []string) {
 	if len(ipsToCheck) == 0 {
 		return
 	}
@@ -242,6 +253,7 @@ func (p *CloudflarePool) checkAllIPs() {
 			if ok {
 				now := time.Now()
 				stats.LastCheck = now.Format(time.RFC3339)
+				stats.lastCheckTime = now
 				if err != nil {
 					stats.Failures++
 					stats.latencyVal = 0 // Invalid
@@ -258,6 +270,27 @@ func (p *CloudflarePool) checkAllIPs() {
 	wg.Wait()
 
 	p.rebuildActiveIPs()
+}
+
+func (p *CloudflarePool) ReportSuccess(ip string) {
+	p.mu.Lock()
+	if stats, ok := p.allIPs[ip]; ok {
+		if stats.Failures > 0 {
+			stats.Failures--
+		}
+	}
+	p.mu.Unlock()
+}
+
+func (p *CloudflarePool) checkAllIPs() {
+	p.mu.RLock()
+	ipsToCheck := make([]string, 0, len(p.allIPs))
+	for ip := range p.allIPs {
+		ipsToCheck = append(ipsToCheck, ip)
+	}
+	p.mu.RUnlock()
+
+	p.checkIPs(ipsToCheck)
 }
 
 func (p *CloudflarePool) rebuildActiveIPs() {
@@ -281,7 +314,7 @@ func (p *CloudflarePool) rebuildActiveIPs() {
 func (p *CloudflarePool) testIP(ip string) (time.Duration, error) {
 	dialer := &net.Dialer{Timeout: 3 * time.Second}
 	start := time.Now()
-	
+
 	conn, err := dialer.Dial("tcp", net.JoinHostPort(ip, "443"))
 	if err != nil {
 		return 0, err
@@ -296,10 +329,10 @@ type apiIPInfo struct {
 }
 
 type cfApiResponse struct {
-	Status bool                      `json:"status"`
-	Code   int                       `json:"code"`
-	Msg    string                    `json:"msg"`
-	Info   map[string][]apiIPInfo    `json:"info"`
+	Status bool                   `json:"status"`
+	Code   int                    `json:"code"`
+	Msg    string                 `json:"msg"`
+	Info   map[string][]apiIPInfo `json:"info"`
 }
 
 func FetchCloudflareIPs(apiKey string) ([]string, error) {

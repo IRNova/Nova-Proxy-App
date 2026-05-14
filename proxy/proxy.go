@@ -25,6 +25,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -34,8 +35,16 @@ import (
 	"github.com/quic-go/quic-go/http3"
 	utls "github.com/refraction-networking/utls"
 	"golang.org/x/net/http2"
-	"golang.org/x/net/proxy"
 )
+
+// tunnelBufPool provides reusable 128KB buffers for tunnel data copying
+// to reduce memory allocation and GC pressure in high-concurrency scenarios.
+var tunnelBufPool = sync.Pool{
+	New: func() interface{} {
+		buf := make([]byte, 128*1024)
+		return &buf
+	},
+}
 
 type CertGenerator interface {
 	GetCACert() *x509.Certificate
@@ -55,19 +64,34 @@ type ProxyServer struct {
 	Fingerprint   string
 	certGenerator CertGenerator
 	recentIngress []string
-	dohResolver   *DoHResolver
+	dohResolver   *FailoverResolver
 	cfPool        *CloudflarePool
 	transport     *http.Transport
-	warpMgr       *WarpManager
 	logCallback   func(string)
 	bytesDown     int64
 	bytesUp       int64
+	certBypassMap sync.Map
+
+	// gsaDialAddr is the address of the local GSA proxy server (e.g. "127.0.0.1:8085").
+	// When set, rules with Mode "gsa" will forward traffic through this proxy.
+	// Set via SetGSADialAddr(); cleared when GSA proxy stops.
+	gsaDialAddr string
+
+	// SOCKS5 proxy settings
+	socksAddr     string
+	socksListener net.Listener
+	socksRunning  bool
+	socksWg       sync.WaitGroup
+
+	// Process monitor for tracking connected apps
+	procMonitor *ProcessMonitor
 }
 
 type RuleManager struct {
 	rules                      []Rule
 	siteGroups                 []SiteGroup
 	upstreams                  []Upstream
+	dnsNodes                   []DNSNode
 	settingsPath               string
 	rulesPath                  string
 	cloudflareConfig           CloudflareConfig
@@ -79,12 +103,19 @@ type RuleManager struct {
 	serverHost                 string
 	serverAuth                 string
 	listenPort                 string
+	listenHost                 string
+	socksAddr                  string
+	socksHost                  string
+	socksPort                  string
 	echProfiles                []ECHProfile
 	autoRouter                 *AutoRouter
 	autoRoutingConfig          AutoRoutingConfig
 	mu                         sync.RWMutex
 	routeEventCallback         func(domain, mode string)
 	onConfigSaved              func()
+	language                   string
+	theme                      string
+	country                    string
 }
 
 func (r *RuleManager) SetRouteEventCallback(cb func(domain, mode string)) {
@@ -101,13 +132,13 @@ func (r *RuleManager) emitRouteEvent(domain, mode string) {
 		cb(domain, mode)
 	}
 }
- 
+
 func (r *RuleManager) SetOnConfigSaved(cb func()) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.onConfigSaved = cb
 }
- 
+
 // triggerConfigSaved fires the config-saved callback asynchronously.
 // It is always called from methods that already hold rm.mu, so no extra locking is needed.
 func (r *RuleManager) triggerConfigSaved() {
@@ -150,36 +181,41 @@ type ECHProfile struct {
 	Config          string `json:"config"`
 	DiscoveryDomain string `json:"discovery_domain,omitempty"`
 	DoHUpstream     string `json:"doh_upstream,omitempty"`
-	AutoUpdate      bool   `json:"auto_update,omitempty"`
+	AutoUpdate      bool   `json:"auto_update"`
 }
 
 type SettingsConfig struct {
 	ListenPort                 string            `json:"listen_port"`
+	ListenHost                 string            `json:"listen_host,omitempty"`
+	SocksAddr                  string            `json:"socks_addr,omitempty"`
+	SocksHost                  string            `json:"socks_host,omitempty"`
+	SocksPort                  string            `json:"socks_port,omitempty"`
 	ServerHost                 string            `json:"server_host,omitempty"`
 	ServerAuth                 string            `json:"server_auth,omitempty"`
 	CloseToTray                *bool             `json:"close_to_tray,omitempty"`
 	AutoStart                  *bool             `json:"auto_start,omitempty"`
 	ShowMainWindowOnAutoStart  *bool             `json:"show_main_window_on_auto_start,omitempty"`
 	AutoEnableProxyOnAutoStart *bool             `json:"auto_enable_proxy_on_auto_start,omitempty"`
-	CloudflareConfig           CloudflareConfig  `json:"cloudflare_config"`
 	AutoRouting                AutoRoutingConfig `json:"auto_routing,omitempty"`
 	TUN                        TUNConfig         `json:"tun,omitempty"`
+	Language                   string            `json:"language,omitempty"`
+	Theme                      string            `json:"theme,omitempty"`
+	Country                    string            `json:"country,omitempty"`
+	CloudflareConfig           CloudflareConfig  `json:"cloudflare_config,omitempty"`
 }
 
 type TUNConfig struct {
-	Enabled     bool   `json:"enabled"`
-	Stack       string `json:"stack,omitempty"`
-	MTU         int    `json:"mtu,omitempty"`
-	DNSHijack   bool   `json:"dns_hijack,omitempty"`
-	AutoRoute   bool   `json:"auto_route,omitempty"`
-	StrictRoute bool   `json:"strict_route,omitempty"`
+	Enabled     bool `json:"enabled"`
+	MTU         int  `json:"mtu,omitempty"`
+	DNSHijack   bool `json:"dns_hijack,omitempty"`
+	AutoRoute   bool `json:"auto_route,omitempty"`
+	StrictRoute bool `json:"strict_route,omitempty"`
 }
 
 type TUNStatus struct {
 	Supported bool   `json:"supported"`
 	Running   bool   `json:"running"`
 	Enabled   bool   `json:"enabled"`
-	Stack     string `json:"stack,omitempty"`
 	Driver    string `json:"driver,omitempty"`
 	Message   string `json:"message,omitempty"`
 }
@@ -187,17 +223,30 @@ type TUNStatus struct {
 type RulesConfig struct {
 	SiteGroups  []SiteGroup  `json:"site_groups"`
 	Upstreams   []Upstream   `json:"upstreams"`
+	DNSNodes    []DNSNode    `json:"dns_nodes,omitempty"`
 	ECHProfiles []ECHProfile `json:"ech_profiles,omitempty"`
 }
 
+// DNSNode defines a DoH upstream with optional SNI obfuscation.
+// It reuses the same dial-level concepts as proxy rules (SNI spoofing, ECH, QUIC, static IPs).
+type DNSNode struct {
+	ID            string           `json:"id"`
+	Name          string           `json:"name"`
+	URL           string           `json:"url"`                      // DoH endpoint
+	SNI           string           `json:"sni,omitempty"`            // Frontend SNI (spoofed domain for TLS ClientHello)
+	IPs           []string         `json:"ips,omitempty"`            // Static backend IPs
+	ECHEnabled    bool             `json:"ech_enabled"`              // Enable ECH for this DoH connection
+	ECHProfileID  string           `json:"ech_profile_id,omitempty"` // ECH profile to use
+	ECHAutoUpdate bool             `json:"ech_auto_update"`          // Enable auto refresh
+	QUIC          bool             `json:"quic"`                     // Use QUIC/HTTP3 transport
+	CertVerify    CertVerifyConfig `json:"cert_verify"`              // Advanced certificate verification
+	Enabled       bool             `json:"enabled"`
+}
+
 type CloudflareConfig struct {
-	PreferredIPs  []string `json:"preferred_ips"`
-	DoHURL        string   `json:"doh_url"`
-	AutoUpdate    bool     `json:"auto_update"`
-	APIKey        string   `json:"api_key"`
-	WarpEnabled   bool     `json:"warp_enabled"`
-	WarpSocksPort int      `json:"warp_socks_port"`
-	WarpEndpoint  string   `json:"warp_endpoint"`
+	PreferredIPs []string `json:"preferred_ips"`
+	AutoUpdate   bool     `json:"auto_update"`
+	APIKey       string   `json:"api_key"`
 }
 
 type trackingListener struct {
@@ -207,14 +256,19 @@ type trackingListener struct {
 
 type statConn struct {
 	net.Conn
-	bytesDown *int64
-	bytesUp   *int64
+	bytesDown   *int64
+	bytesUp     *int64
+	clientAddr  string
+	procMonitor *ProcessMonitor
 }
 
 func (c *statConn) Read(p []byte) (n int, err error) {
 	n, err = c.Conn.Read(p)
 	if n > 0 {
 		atomic.AddInt64(c.bytesUp, int64(n))
+		if c.procMonitor != nil {
+			c.procMonitor.RecordBytes(c.clientAddr, 0, int64(n))
+		}
 	}
 	return n, err
 }
@@ -223,6 +277,9 @@ func (c *statConn) Write(p []byte) (n int, err error) {
 	n, err = c.Conn.Write(p)
 	if n > 0 {
 		atomic.AddInt64(c.bytesDown, int64(n))
+		if c.procMonitor != nil {
+			c.procMonitor.RecordBytes(c.clientAddr, int64(n), 0)
+		}
 	}
 	return n, err
 }
@@ -271,7 +328,6 @@ type roundTripperFunc func(*http.Request) (*http.Response, error)
 func (f roundTripperFunc) RoundTrip(req *http.Request) (*http.Response, error) { return f(req) }
 
 var hopByHopHeaders = []string{
-	"Connection",
 	"Proxy-Connection",
 	"Keep-Alive",
 	"Proxy-Authenticate",
@@ -279,17 +335,19 @@ var hopByHopHeaders = []string{
 	"Te",
 	"Trailer",
 	"Transfer-Encoding",
-	"Upgrade",
 }
 
 func removeHopByHopHeaders(h http.Header) {
 	if h == nil {
 		return
 	}
+	// Preserve Connection and Upgrade headers for WebSocket support
 	if c := h.Get("Connection"); c != "" {
 		for _, f := range strings.Split(c, ",") {
 			if name := textproto.TrimString(f); name != "" {
-				h.Del(name)
+				if !strings.EqualFold(name, "Upgrade") {
+					h.Del(name)
+				}
 			}
 		}
 	}
@@ -303,10 +361,16 @@ func (l *trackingListener) Accept() (net.Conn, error) {
 	if err != nil {
 		return nil, err
 	}
+	clientAddr := conn.RemoteAddr().String()
+	if pm := l.proxy.procMonitor; pm != nil {
+		pm.TrackConnection(clientAddr)
+	}
 	return &statConn{
-		Conn:      conn,
-		bytesDown: &l.proxy.bytesDown,
-		bytesUp:   &l.proxy.bytesUp,
+		Conn:        conn,
+		bytesDown:   &l.proxy.bytesDown,
+		bytesUp:     &l.proxy.bytesUp,
+		clientAddr:  clientAddr,
+		procMonitor: l.proxy.procMonitor,
 	}, nil
 }
 
@@ -323,15 +387,13 @@ type Rule struct {
 	SiteID             string
 	ECHEnabled         bool
 	ECHProfileID       string
-	ECHDomain          string
 	UseCFPool          bool
-	ECHConfig          []byte
 	ECHDiscoveryDomain string
 	ECHDoHUpstream     string
 	ECHAutoUpdate      bool
 	CertVerify         CertVerifyConfig
 	AutoRouted         bool   // true if generated by AutoRouter
-	FallbackMode       string // "warp" or "server" fallback transport
+	FallbackMode       string // "server" fallback transport
 }
 
 func mergeRule(base, overlay Rule) Rule {
@@ -688,6 +750,11 @@ func domainMatchScore(host, domain string) int {
 		return -1
 	}
 
+	// Wildcard "*" matches everything with lowest priority
+	if domain == "*" {
+		return 1
+	}
+
 	if host == domain {
 		return len(domain) + 1000 // Prefer exact match over suffix match.
 	}
@@ -783,7 +850,7 @@ func (p *ProxyServer) resolveDomainCandidates(ctx context.Context, host, port, d
 
 	ips, err := p.dohResolver.ResolveIPAddrs(ctx, host)
 	if err != nil {
-		log.Printf("[DNS] Resolve failed for %s via %s: %v", host, p.dohResolver.ServerURL, err)
+		log.Printf("[DNS] Resolve failed for %s via Failover DNS: %v", host, err)
 		return nil
 	}
 
@@ -797,7 +864,7 @@ func (p *ProxyServer) resolveDomainCandidates(ctx context.Context, host, port, d
 	for _, ip := range ordered {
 		candidates = append(candidates, net.JoinHostPort(ip.String(), port))
 	}
-	log.Printf("[DNS] Resolved %s via DoH (%s) mode=%s -> %v", host, p.dohResolver.ServerURL, normalizeDNSMode(dnsMode), candidates)
+	log.Printf("[DNS] Resolved %s via Failover DNS mode=%s -> %v", host, normalizeDNSMode(dnsMode), candidates)
 	return dedupeDialCandidates(candidates)
 }
 
@@ -822,8 +889,14 @@ func (p *ProxyServer) buildDialCandidates(ctx context.Context, targetHost, targe
 
 			firstHost := firstUpstreamHost(targetHost, resolvedUpstream)
 			if firstHost != "" && !isLiteralIP(firstHost) {
+				// Try DoH first, then fallback to system DNS
 				if resolved := p.resolveDomainCandidates(ctx, firstHost, defaultPort, rule.DNSMode); len(resolved) > 0 {
 					return resolved
+				}
+				// DoH failed: resolve via system DNS and return all IPs as candidates
+				if sysIPs := resolveSystemDNS(firstHost, defaultPort); len(sysIPs) > 0 {
+					log.Printf("[DNS] DoH failed, using system DNS for %s -> %v", firstHost, sysIPs)
+					return sysIPs
 				}
 			}
 			return upstreamCandidates
@@ -843,9 +916,42 @@ func (p *ProxyServer) buildDialCandidates(ctx context.Context, targetHost, targe
 		if resolved := p.resolveDomainCandidates(ctx, targetHost, defaultPort, rule.DNSMode); len(resolved) > 0 {
 			return resolved
 		}
+		// DoH failed: fallback to system DNS
+		if sysIPs := resolveSystemDNS(targetHost, defaultPort); len(sysIPs) > 0 {
+			log.Printf("[DNS] DoH failed, using system DNS for %s -> %v", targetHost, sysIPs)
+			return sysIPs
+		}
 	}
 
 	return []string{targetAddr}
+}
+
+func resolveSystemDNS(host, port string) []string {
+	ips, err := net.DefaultResolver.LookupIPAddr(context.Background(), host)
+	if err != nil {
+		return nil
+	}
+	out := make([]string, 0, len(ips))
+	seen := make(map[string]struct{})
+	for _, ip := range ips {
+		addr := ip.IP.String()
+		if _, ok := seen[addr]; ok {
+			continue
+		}
+		seen[addr] = struct{}{}
+		if ip.IP.To4() != nil {
+			out = append(out, net.JoinHostPort(addr, port))
+		}
+	}
+	if len(out) == 0 {
+		for _, ip := range ips {
+			addr := ip.IP.String()
+			if ip.IP.To4() == nil {
+				out = append(out, net.JoinHostPort("["+addr+"]", port))
+			}
+		}
+	}
+	return out
 }
 
 func chooseUpstreamSNI(targetHost string, rule Rule) string {
@@ -904,16 +1010,22 @@ func NewProxyServer(addr string) *ProxyServer {
 			DialContext: (&net.Dialer{
 				Timeout:   30 * time.Second,
 				KeepAlive: 30 * time.Second,
+				DualStack: true,
 			}).DialContext,
-			MaxIdleConns:          100,
-			IdleConnTimeout:       90 * time.Second,
-			TLSHandshakeTimeout:   10 * time.Second,
+			MaxIdleConns:          200,
+			IdleConnTimeout:       120 * time.Second,
+			TLSHandshakeTimeout:   8 * time.Second,
 			ExpectContinueTimeout: 1 * time.Second,
-			MaxIdleConnsPerHost:   10,
+			MaxIdleConnsPerHost:   50,
+			MaxConnsPerHost:       100,
+			ResponseHeaderTimeout: 30 * time.Second,
+			WriteBufferSize:       64 * 1024,
+			ReadBufferSize:        64 * 1024,
 		},
-		dohResolver: NewDoHResolver(""),
-		cfPool:      NewCloudflarePool([]string{}),
+		// dohResolver is initialized separately down below to inject proxy reference
+		cfPool: NewCloudflarePool([]string{}),
 	}
+	p.dohResolver = NewFailoverResolver(p)
 	p.rules = NewRuleManager("", "")
 	return p
 }
@@ -923,12 +1035,6 @@ func (p *ProxyServer) SetRuleManager(rm *RuleManager) {
 	p.rules = rm
 	if rm != nil {
 		cfg := rm.GetCloudflareConfig()
-		if p.dohResolver != nil {
-			p.dohResolver.ServerURL = cfg.DoHURL
-			if p.dohResolver.ServerURL == "" {
-				p.dohResolver.ServerURL = "https://223.5.5.5/dns-query"
-			}
-		}
 		if p.cfPool != nil {
 			p.cfPool.UpdateIPs(cfg.PreferredIPs)
 		}
@@ -940,12 +1046,6 @@ func (p *ProxyServer) SetCertGenerator(cg CertGenerator) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.certGenerator = cg
-}
-
-func (p *ProxyServer) SetWarpManager(wm *WarpManager) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	p.warpMgr = wm
 }
 
 func (p *ProxyServer) SetLogCallback(cb func(string)) {
@@ -969,12 +1069,6 @@ func (p *ProxyServer) tracef(format string, args ...interface{}) {
 func (p *ProxyServer) UpdateCloudflareConfig(cfg CloudflareConfig) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if p.dohResolver != nil {
-		p.dohResolver.ServerURL = cfg.DoHURL
-		if p.dohResolver.ServerURL == "" {
-			p.dohResolver.ServerURL = "https://223.5.5.5/dns-query"
-		}
-	}
 	if p.cfPool != nil {
 		p.cfPool.UpdateIPs(cfg.PreferredIPs)
 	}
@@ -986,6 +1080,31 @@ func (p *ProxyServer) UpdateCloudflareIPPool(ips []string) {
 	if p.cfPool != nil {
 		p.cfPool.UpdateIPs(ips)
 	}
+}
+
+
+func (p *ProxyServer) SetGSADialAddr(addr string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.gsaDialAddr = addr
+	log.Printf("[Proxy] GSA dial address set to: %s", addr)
+}
+
+func (p *ProxyServer) SetSOCKSAddr(addr string) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.running {
+		return fmt.Errorf("cannot change SOCKS5 address while proxy is running")
+	}
+	p.socksAddr = addr
+	log.Printf("[Proxy] SOCKS5 address set to: %s", addr)
+	return nil
+}
+
+func (p *ProxyServer) GetSOCKSAddr() string {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.socksAddr
 }
 
 func (p *ProxyServer) SetListenAddr(addr string) error {
@@ -1030,15 +1149,22 @@ func (p *ProxyServer) GetListenAddr() string {
 	return p.listenAddr
 }
 
-func (p *ProxyServer) GetDoHResolver() *DoHResolver {
+func (p *ProxyServer) GetDoHResolver() *FailoverResolver {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 	return p.dohResolver
 }
 
+func (p *ProxyServer) UpdateECHProfileConfig(profileID string, configBytes []byte) {
+	if p.rules == nil {
+		return
+	}
+	_ = p.rules.UpdateECHProfileConfig(profileID, configBytes)
+}
+
 func (p *ProxyServer) SetMode(mode string) error {
 	mode = strings.ToLower(strings.TrimSpace(mode))
-	if mode != "mitm" && mode != "transparent" && mode != "tls-rf" && mode != "quic" {
+	if mode != "mitm" && mode != "transparent" && mode != "tls-rf" && mode != "quic" && mode != "gsa" {
 		return fmt.Errorf("invalid proxy mode: %s", mode)
 	}
 	p.mu.Lock()
@@ -1074,30 +1200,45 @@ func (p *ProxyServer) Start() error {
 		p.cfPool.Start()
 	}
 
-	if p.cfPool != nil {
-		p.cfPool.Start()
-	}
-
 	p.mu.Unlock()
 
 	ln, err := net.Listen("tcp", listenAddr)
 	if err != nil {
-		// Clean up pool if listen fails
 		if p.cfPool != nil {
 			p.cfPool.Stop()
 		}
 		return fmt.Errorf("failed to listen on %s: %w", listenAddr, err)
 	}
 
+	// Start SOCKS5 listener if address is configured
+	var socksLn net.Listener
+	p.mu.RLock()
+	socksAddr := p.socksAddr
+	p.mu.RUnlock()
+	if socksAddr != "" {
+		socksLn, err = net.Listen("tcp", socksAddr)
+		if err != nil {
+			log.Printf("[Proxy] WARNING: SOCKS5 listen on %s failed: %v", socksAddr, err)
+		} else {
+			log.Printf("[Proxy] SOCKS5 listening on %s", socksAddr)
+		}
+	}
+
 	p.mu.Lock()
-	// Re-check state in case Stop/Start race happened while binding.
 	if p.running {
 		p.mu.Unlock()
 		_ = ln.Close()
+		if socksLn != nil {
+			_ = socksLn.Close()
+		}
 		return nil
 	}
 	p.Server = srv
 	p.running = true
+	if socksLn != nil {
+		p.socksListener = socksLn
+		p.socksRunning = true
+	}
 	p.mu.Unlock()
 
 	go func() {
@@ -1116,13 +1257,21 @@ func (p *ProxyServer) Start() error {
 		p.mu.Unlock()
 	}()
 
+	if socksLn != nil {
+		p.socksWg.Add(1)
+		go func() {
+			defer p.socksWg.Done()
+			p.socksAcceptLoop(socksLn)
+		}()
+	}
+
 	return nil
 }
 
 func (p *ProxyServer) Stop() error {
 	p.mu.Lock()
-	defer p.mu.Unlock()
 	if !p.running {
+		p.mu.Unlock()
 		return nil
 	}
 	p.running = false
@@ -1130,6 +1279,17 @@ func (p *ProxyServer) Stop() error {
 	if p.cfPool != nil {
 		p.cfPool.Stop()
 	}
+
+	socksLn := p.socksListener
+	p.socksListener = nil
+	p.socksRunning = false
+	p.mu.Unlock()
+
+	// Close SOCKS5 listener first to stop accept loop
+	if socksLn != nil {
+		_ = socksLn.Close()
+	}
+	p.socksWg.Wait()
 
 	if p.Server != nil {
 		return p.Server.Close()
@@ -1174,9 +1334,15 @@ func (p *ProxyServer) handleConnect(w http.ResponseWriter, req *http.Request, ru
 	}
 	targetHost := normalizeHost(targetAuthority)
 	targetAddr := ensureAddrWithPort(targetAuthority, "443")
+
+	// GSA active: forward ALL traffic through local GSA proxy, no mode processing
+	if p.gsaDialAddr != "" {
+		p.handleGSAConnect(w, req, targetHost, targetAuthority)
+		return
+	}
+
 	effectiveMode := rule.Mode
 	resolvedUpstream := resolveRuleUpstream(targetHost, rule)
-	isWarpRoute := strings.EqualFold(strings.TrimSpace(rule.Upstream), "warp")
 
 	switch strings.ToLower(strings.TrimSpace(rule.ConnectPolicy)) {
 	case "tunnel_origin":
@@ -1191,16 +1357,7 @@ func (p *ProxyServer) handleConnect(w http.ResponseWriter, req *http.Request, ru
 		resolvedUpstream = ""
 	}
 
-	// Warp routes should tunnel the original destination via SOCKS5, not enter
-	// the dedicated server-mode path that expects a configured Worker/VPS host.
-	if isWarpRoute && effectiveMode == "server" {
-		effectiveMode = "transparent"
-		resolvedUpstream = ""
-	}
-
-	// Stage-2 match: if stage-1 produced a dynamic upstream host (eg. *.gvt1.com),
-	// allow that upstream host to hit another rule and override policies.
-	if !isWarpRoute && (effectiveMode == "mitm" || effectiveMode == "transparent") && strings.TrimSpace(resolvedUpstream) != "" {
+	if (effectiveMode == "mitm" || effectiveMode == "transparent") && strings.TrimSpace(resolvedUpstream) != "" {
 		upHost := firstUpstreamHost(targetHost, resolvedUpstream)
 		if upHost != "" {
 			upRule := p.rules.matchRule(upHost, effectiveMode)
@@ -1217,13 +1374,13 @@ func (p *ProxyServer) handleConnect(w http.ResponseWriter, req *http.Request, ru
 
 	p.tracef("[Connect] target=%s host=%s mode=%s->%s upstream=%s sni_fake=%s", targetAddr, targetHost, rule.Mode, effectiveMode, resolvedUpstream, rule.SniFake)
 
-	// For direct mode, connect directly to the target
+	// For direct mode, connect directly to target
 	if effectiveMode == "direct" {
 		p.directConnect(w, req)
 		return
 	}
 
-	// For server mode, hijack directly and use built-in HTTP service for parsing, no dialing to original target
+	// For server mode, hijack directly and use built-in HTTP service for resolution, no dial to original target
 	if effectiveMode == "server" {
 		hijacker, ok := w.(http.Hijacker)
 		if !ok {
@@ -1291,7 +1448,7 @@ func (p *ProxyServer) handleConnect(w http.ResponseWriter, req *http.Request, ru
 			return p.dialWithRule(context.Background(), network, addr, rule)
 		}
 
-		// Single-path stability priority (combined with sequential fallback)
+		// Single-path stability first (with sequential fallback)
 		if len(dialCandidates) > 1 {
 			var lastErr error
 			for _, addr := range dialCandidates {
@@ -1300,7 +1457,7 @@ func (p *ProxyServer) handleConnect(w http.ResponseWriter, req *http.Request, ru
 					dialAddr = addr
 					log.Printf("[Connect] Sequential dial success: %s", dialAddr)
 
-					// If CF optimized pool is used, report success status
+					// If using CF preferred pool, report success status
 					if rule.UseCFPool && p.cfPool != nil {
 						host, _, _ := net.SplitHostPort(addr)
 						if host != "" {
@@ -1313,7 +1470,7 @@ func (p *ProxyServer) handleConnect(w http.ResponseWriter, req *http.Request, ru
 				log.Printf("[Connect] Connect failed to %s: %v", addr, err)
 				lastErr = err
 
-				// If this candidate connection fails and comes from CF pool, report failure for penalty
+				// If candidate node connection failed and from CF pool, report failure for penalty
 				if rule.UseCFPool && p.cfPool != nil {
 					host, _, _ := net.SplitHostPort(addr)
 					if host != "" {
@@ -1419,7 +1576,7 @@ func (p *ProxyServer) handleConnect(w http.ResponseWriter, req *http.Request, ru
 	_ = clientConn.SetDeadline(time.Time{})
 	_ = conn.SetDeadline(time.Time{})
 
-	// Note: Do not use defer after hijack, as we need to keep the connection open
+	// Note: do not use defer after hijack, because we need to keep the connection open
 	switch effectiveMode {
 	case "mitm":
 		p.handleMITM(clientConn, targetHost, rule, dialCandidates, dialAddr)
@@ -1478,26 +1635,372 @@ func (p *ProxyServer) directConnect(w http.ResponseWriter, req *http.Request) {
 	// Bidirectional data copy
 	var wg sync.WaitGroup
 	wg.Add(2)
+
+	// Get buffers from pool to reduce allocation
+	buf1 := tunnelBufPool.Get().(*[]byte)
+	buf2 := tunnelBufPool.Get().(*[]byte)
+
 	go func() {
 		defer wg.Done()
-		buf := make([]byte, 128*1024)
-		_, _ = io.CopyBuffer(conn, clientConn, buf)
+		defer tunnelBufPool.Put(buf1)
+		_, _ = io.CopyBuffer(conn, clientConn, *buf1)
 		conn.Close()
 	}()
 	go func() {
 		defer wg.Done()
-		buf := make([]byte, 128*1024)
-		_, _ = io.CopyBuffer(clientConn, conn, buf)
+		defer tunnelBufPool.Put(buf2)
+		_, _ = io.CopyBuffer(clientConn, conn, *buf2)
 		clientConn.Close()
 	}()
 	wg.Wait()
 }
 
+
+// handleGSAConnect handles a CONNECT request by forwarding it through the local GSA proxy server.
+func (p *ProxyServer) handleGSAConnect(w http.ResponseWriter, req *http.Request, targetHost, targetAuthority string) {
+	log.Printf("[GSA] handleGSAConnect called: target=%s gsaDialAddr=%s", targetAuthority, p.gsaDialAddr)
+	if p.gsaDialAddr == "" {
+		log.Printf("[GSA] GSA proxy NOT running (gsaDialAddr is empty) — falling back to direct CONNECT %s", targetAuthority)
+		p.tracef("[GSA] WARNING: Falling back to direct connection because GSA proxy is not running")
+		p.directConnect(w, req)
+		return
+	}
+	log.Printf("[GSA] Forwarding CONNECT %s through GSA proxy at %s", targetAuthority, p.gsaDialAddr)
+
+	log.Printf("[GSA] Step 1: dialing GSA proxy at %s", p.gsaDialAddr)
+	gsaConn, err := net.DialTimeout("tcp", p.gsaDialAddr, 10*time.Second)
+	if err != nil {
+		log.Printf("[GSA] WARNING: Failed to connect to GSA proxy at %s: %v — falling back to direct", p.gsaDialAddr, err)
+		p.directConnect(w, req)
+		return
+	}
+	defer gsaConn.Close()
+	log.Printf("[GSA] Step 2: connected to GSA proxy, sending CONNECT")
+
+	// Send CONNECT request through GSA proxy
+	connectReq := fmt.Sprintf("CONNECT %s HTTP/1.1\r\nHost: %s\r\n\r\n", targetAuthority, targetHost)
+	if _, err := fmt.Fprint(gsaConn, connectReq); err != nil {
+		log.Printf("[GSA] CONNECT write failed: %v", err)
+		http.Error(w, "GSA CONNECT failed", http.StatusBadGateway)
+		return
+	}
+	log.Printf("[GSA] Step 3: CONNECT sent, waiting for response")
+
+	// Read GSA proxy response
+	gsaReader := bufio.NewReader(gsaConn)
+	resp, err := http.ReadResponse(gsaReader, nil)
+	if err != nil || resp.StatusCode != http.StatusOK {
+		status := http.StatusBadGateway
+		if err == nil {
+			log.Printf("[GSA] GSA proxy rejected CONNECT: %d", resp.StatusCode)
+		} else {
+			log.Printf("[GSA] GSA proxy response error: %v", err)
+		}
+		http.Error(w, "GSA proxy rejected CONNECT", status)
+		return
+	}
+	resp.Body.Close()
+	log.Printf("[GSA] Step 4: received 200 from GSA proxy, hijacking client")
+
+	// Hijack client connection
+	hijacker, ok := w.(http.Hijacker)
+	if !ok {
+		http.Error(w, "Hijack not supported", http.StatusInternalServerError)
+		return
+	}
+	clientConn, rw, err := hijacker.Hijack()
+	if err != nil {
+		log.Printf("[GSA] Hijack failed: %v", err)
+		return
+	}
+	defer clientConn.Close()
+	log.Printf("[GSA] Step 5: client hijacked, sending 200 to client")
+
+	// Send 200 to client
+	if _, err := rw.WriteString("HTTP/1.1 200 Connection Established\r\n\r\n"); err != nil {
+		log.Printf("[GSA] 200 write to client failed: %v", err)
+		return
+	}
+	if err := rw.Flush(); err != nil {
+		log.Printf("[GSA] flush to client failed: %v", err)
+		return
+	}
+	clientConn = wrapHijackedConn(clientConn, rw)
+	log.Printf("[GSA] Step 6: starting bidirectional copy between client and GSA proxy")
+
+	// Bidirectional copy
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		n, err := io.Copy(clientConn, gsaConn)
+		log.Printf("[GSA] io.Copy gsa->client: %d bytes, err=%v", n, err)
+		wg.Done()
+	}()
+	go func() {
+		n, err := io.Copy(gsaConn, clientConn)
+		log.Printf("[GSA] io.Copy client->gsa: %d bytes, err=%v", n, err)
+		wg.Done()
+	}()
+	wg.Wait()
+	log.Printf("[GSA] Step 7: bidirectional copy finished")
+}
+
+// handleGSAHTTP handles a plain HTTP request by forwarding it through the local GSA proxy server.
+func (p *ProxyServer) handleGSAHTTP(w http.ResponseWriter, req *http.Request) {
+	if p.gsaDialAddr == "" {
+		log.Printf("[GSA] GSA proxy NOT running — falling back to direct HTTP %s %s", req.Method, req.URL)
+		resp, err := p.transport.RoundTrip(req)
+		if err != nil {
+			http.Error(w, "GSA fallback failed: "+err.Error(), http.StatusBadGateway)
+			return
+		}
+		defer resp.Body.Close()
+		for k, v := range resp.Header {
+			for _, vv := range v {
+				w.Header().Add(k, vv)
+			}
+		}
+		w.WriteHeader(resp.StatusCode)
+		io.Copy(w, resp.Body)
+		return
+	}
+	log.Printf("[GSA] Forwarding HTTP %s %s through GSA proxy at %s", req.Method, req.URL, p.gsaDialAddr)
+
+	gsaConn, err := net.DialTimeout("tcp", p.gsaDialAddr, 10*time.Second)
+	if err != nil {
+		log.Printf("[GSA] Failed to connect to GSA proxy: %v", err)
+		resp, err := p.transport.RoundTrip(req)
+		if err != nil {
+			http.Error(w, "GSA fallback failed: "+err.Error(), http.StatusBadGateway)
+			return
+		}
+		defer resp.Body.Close()
+		for k, v := range resp.Header {
+			for _, vv := range v {
+				w.Header().Add(k, vv)
+			}
+		}
+		w.WriteHeader(resp.StatusCode)
+		io.Copy(w, resp.Body)
+		return
+	}
+	defer gsaConn.Close()
+
+	// Send the request as an HTTP proxy request
+	if err := req.WriteProxy(gsaConn); err != nil {
+		log.Printf("[GSA] Request write failed: %v", err)
+		http.Error(w, "GSA proxy request failed", http.StatusBadGateway)
+		return
+	}
+
+	// Read response from GSA proxy
+	resp, err := http.ReadResponse(bufio.NewReader(gsaConn), req)
+	if err != nil {
+		log.Printf("[GSA] Response read failed: %v", err)
+		http.Error(w, "GSA proxy response failed", http.StatusBadGateway)
+		return
+	}
+	defer resp.Body.Close()
+
+	// Copy response headers
+	for key, values := range resp.Header {
+		for _, value := range values {
+			w.Header().Add(key, value)
+		}
+	}
+	w.WriteHeader(resp.StatusCode)
+	io.Copy(w, resp.Body)
+}
+
+// socksAcceptLoop accepts SOCKS5 connections and spawns a handler goroutine.
+func (p *ProxyServer) socksAcceptLoop(ln net.Listener) {
+	for {
+		conn, err := ln.Accept()
+		if err != nil {
+			p.mu.RLock()
+			running := p.running
+			p.mu.RUnlock()
+			if !running {
+				return
+			}
+			continue
+		}
+		go p.handleSOCKS5(conn)
+	}
+}
+
+// handleSOCKS5 handles a single SOCKS5 connection.
+// When GSA mode is active (gsaDialAddr is set), it forwards traffic through the GSA proxy.
+// Otherwise, it creates a direct TCP tunnel to the target.
+func (p *ProxyServer) handleSOCKS5(conn net.Conn) {
+	defer conn.Close()
+	_ = conn.SetDeadline(time.Now().Add(15 * time.Second))
+
+	buf := make([]byte, 2)
+	if _, err := io.ReadFull(conn, buf); err != nil {
+		log.Printf("[SOCKS5] read greeting failed: %v", err)
+		return
+	}
+	if buf[0] != 5 {
+		log.Printf("[SOCKS5] bad SOCKS version: %d", buf[0])
+		return
+	}
+	methods := make([]byte, int(buf[1]))
+	if _, err := io.ReadFull(conn, methods); err != nil {
+		log.Printf("[SOCKS5] read methods failed: %v", err)
+		return
+	}
+	_, _ = conn.Write([]byte{0x05, 0x00})
+
+	request := make([]byte, 4)
+	if _, err := io.ReadFull(conn, request); err != nil {
+		log.Printf("[SOCKS5] read request failed: %v", err)
+		return
+	}
+	if request[0] != 5 || request[1] != 0x01 {
+		log.Printf("[SOCKS5] unsupported command: ver=%d cmd=%d", request[0], request[1])
+		_, _ = conn.Write([]byte{0x05, 0x07, 0x00, 0x01, 0, 0, 0, 0, 0, 0})
+		return
+	}
+
+	addrType := request[3]
+	var host string
+	switch addrType {
+	case 0x01:
+		ip := make([]byte, 4)
+		if _, err := io.ReadFull(conn, ip); err != nil {
+			log.Printf("[SOCKS5] read IPv4 failed: %v", err)
+			return
+		}
+		host = net.IP(ip).String()
+	case 0x03:
+		ln := make([]byte, 1)
+		if _, err := io.ReadFull(conn, ln); err != nil {
+			log.Printf("[SOCKS5] read domain length failed: %v", err)
+			return
+		}
+		name := make([]byte, int(ln[0]))
+		if _, err := io.ReadFull(conn, name); err != nil {
+			log.Printf("[SOCKS5] read domain name failed: %v", err)
+			return
+		}
+		host = string(name)
+	case 0x04:
+		ip := make([]byte, 16)
+		if _, err := io.ReadFull(conn, ip); err != nil {
+			log.Printf("[SOCKS5] read IPv6 failed: %v", err)
+			return
+		}
+		host = net.IP(ip).String()
+	default:
+		log.Printf("[SOCKS5] unsupported address type: 0x%02x", addrType)
+		_, _ = conn.Write([]byte{0x05, 0x08, 0x00, 0x01, 0, 0, 0, 0, 0, 0})
+		return
+	}
+	portBuf := make([]byte, 2)
+	if _, err := io.ReadFull(conn, portBuf); err != nil {
+		log.Printf("[SOCKS5] read port failed: %v", err)
+		return
+	}
+	port := int(portBuf[0])<<8 | int(portBuf[1])
+
+	_, _ = conn.Write([]byte{0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0})
+	log.Printf("[SOCKS5] CONNECT -> %s:%d", host, port)
+	_ = conn.SetDeadline(time.Time{})
+
+	p.socksRelay(host, port, conn)
+}
+
+// socksRelay relays a SOCKS5 connection. When GSA is active, it uses a CONNECT
+// tunnel through the GSA proxy so that TLS traffic goes through GSA's MITM/relay
+// and HTTP traffic goes through GSA's HTTP handler. Otherwise creates a direct TCP tunnel.
+func (p *ProxyServer) socksRelay(host string, port int, conn net.Conn) {
+	p.mu.RLock()
+	gsaAddr := p.gsaDialAddr
+	p.mu.RUnlock()
+
+	if gsaAddr == "" {
+		log.Printf("[SOCKS5] direct TCP tunnel to %s:%d", host, port)
+		p.socksDirect(host, port, conn)
+		return
+	}
+
+	log.Printf("[SOCKS5] CONNECT tunnel through GSA proxy at %s for %s:%d", gsaAddr, host, port)
+
+	gsaConn, err := net.DialTimeout("tcp", gsaAddr, 10*time.Second)
+	if err != nil {
+		log.Printf("[SOCKS5] GSA dial failed: %v — direct TCP tunnel to %s:%d", err, host, port)
+		p.socksDirect(host, port, conn)
+		return
+	}
+	defer gsaConn.Close()
+
+	// Use CONNECT tunnel through GSA proxy so TLS goes through MITM/relay,
+	// HTTP goes through relayHTTPOverTLS, and both end up in Apps Script.
+	target := net.JoinHostPort(host, strconv.Itoa(port))
+	connectReq := fmt.Sprintf("CONNECT %s HTTP/1.1\r\nHost: %s\r\n\r\n", target, host)
+	if _, err := fmt.Fprint(gsaConn, connectReq); err != nil {
+		log.Printf("[SOCKS5] CONNECT write to GSA failed: %v — direct fallback", err)
+		p.socksDirect(host, port, conn)
+		return
+	}
+
+	resp, err := http.ReadResponse(bufio.NewReader(gsaConn), nil)
+	if err != nil || resp.StatusCode != http.StatusOK {
+		if err != nil {
+			log.Printf("[SOCKS5] GSA CONNECT response error: %v — direct fallback", err)
+		} else {
+			log.Printf("[SOCKS5] GSA CONNECT rejected %s: %d — direct fallback", target, resp.StatusCode)
+		}
+		p.socksDirect(host, port, conn)
+		return
+	}
+	resp.Body.Close()
+
+	log.Printf("[SOCKS5] GSA CONNECT tunnel established for %s", target)
+	p.socksTunnel(conn, gsaConn)
+}
+
+// socksTunnel performs bidirectional copy between two connections.
+func (p *ProxyServer) socksTunnel(client, upstream net.Conn) {
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		n, err := io.Copy(upstream, client)
+		log.Printf("[SOCKS5] io.Copy client->upstream: %d bytes, err=%v", n, err)
+		wg.Done()
+	}()
+	go func() {
+		n, err := io.Copy(client, upstream)
+		log.Printf("[SOCKS5] io.Copy upstream->client: %d bytes, err=%v", n, err)
+		wg.Done()
+	}()
+	wg.Wait()
+}
+
+// socksDirect creates a direct TCP tunnel to the target host:port.
+func (p *ProxyServer) socksDirect(host string, port int, client net.Conn) {
+	target := net.JoinHostPort(host, strconv.Itoa(port))
+	dst, err := net.DialTimeout("tcp", target, 15*time.Second)
+	if err != nil {
+		log.Printf("[SOCKS5] direct dial failed for %s: %v", target, err)
+		return
+	}
+	defer dst.Close()
+	p.socksTunnel(client, dst)
+}
+
 func (p *ProxyServer) handleHTTP(w http.ResponseWriter, req *http.Request, rule Rule) {
-	// Create a new request to avoid modifying the original request
+	// Create new request to avoid modifying original request
 	newReq := req.Clone(req.Context())
 	newReq.RequestURI = ""
 	newReq.Header.Del("Proxy-Connection")
+
+	// GSA active: forward ALL HTTP traffic through local GSA proxy
+	if p.gsaDialAddr != "" {
+		p.handleGSAHTTP(w, newReq)
+		return
+	}
 
 	if newReq.URL.Scheme == "" {
 		if req.TLS != nil {
@@ -1516,7 +2019,6 @@ func (p *ProxyServer) handleHTTP(w http.ResponseWriter, req *http.Request, rule 
 		newReq.Host = newReq.URL.Host
 	}
 
-	// MITM rules are designed around HTTPS interception. Redirect plain HTTP to
 	// HTTPS so requests enter the CONNECT/TLS handling path instead of the basic
 	// HTTP forwarder, which does not implement the full MITM feature set.
 	if (rule.Mode == "mitm" || rule.Mode == "quic") && newReq.URL.Scheme == "http" {
@@ -1530,7 +2032,7 @@ func (p *ProxyServer) handleHTTP(w http.ResponseWriter, req *http.Request, rule 
 	}
 
 	if rule.Mode == "direct" {
-		// Forward request directly
+		// Direct forward request
 		resp, err := p.transport.RoundTrip(newReq)
 		if err != nil {
 			log.Printf("[HTTP] Direct proxy failed: %v", err)
@@ -1539,7 +2041,7 @@ func (p *ProxyServer) handleHTTP(w http.ResponseWriter, req *http.Request, rule 
 		}
 		defer resp.Body.Close()
 
-		// Copy response headers
+	// Copy response headers
 		for key, values := range resp.Header {
 			for _, value := range values {
 				w.Header().Add(key, value)
@@ -1551,13 +2053,7 @@ func (p *ProxyServer) handleHTTP(w http.ResponseWriter, req *http.Request, rule 
 	}
 
 	transport := http.RoundTripper(p.transport)
-	if strings.EqualFold(strings.TrimSpace(rule.Upstream), "warp") {
-		t := p.transport.Clone()
-		t.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
-			return p.dialWithRule(ctx, network, addr, rule)
-		}
-		transport = t
-	} else if rule.Upstream != "" {
+	if rule.Upstream != "" {
 		defaultPort := "80"
 		if strings.EqualFold(newReq.URL.Scheme, "https") {
 			defaultPort = "443"
@@ -1593,13 +2089,13 @@ func (p *ProxyServer) handleHTTP(w http.ResponseWriter, req *http.Request, rule 
 
 	resp, err := transport.RoundTrip(newReq)
 	if err != nil {
-		log.Printf("[HTTP] HTTPS proxy failed: %v", err)
-		http.Error(w, "Failed to proxy", http.StatusBadGateway)
+		log.Printf("[HTTP] Proxy failed: %v", err)
+		http.Error(w, "Failed to connect to upstream", http.StatusBadGateway)
 		return
 	}
 	defer resp.Body.Close()
 
-	// Copy response headers
+	// 复制响应头
 	for key, values := range resp.Header {
 		for _, value := range values {
 			w.Header().Add(key, value)
@@ -1688,17 +2184,22 @@ func (p *ProxyServer) directTunnel(clientConn, upstreamConn net.Conn) {
 	p.tracef("[Tunnel] Starting direct tunnel")
 	var wg sync.WaitGroup
 	wg.Add(2)
+
+	// Get buffers from pool to reduce allocation
+	buf1 := tunnelBufPool.Get().(*[]byte)
+	buf2 := tunnelBufPool.Get().(*[]byte)
+
 	go func() {
 		defer wg.Done()
-		buf := make([]byte, 128*1024)
-		n, err := io.CopyBuffer(upstreamConn, clientConn, buf)
+		defer tunnelBufPool.Put(buf1)
+		n, err := io.CopyBuffer(upstreamConn, clientConn, *buf1)
 		p.tracef("[Tunnel] Client -> Upstream: %d bytes, err: %v", n, err)
 		upstreamConn.Close()
 	}()
 	go func() {
 		defer wg.Done()
-		buf := make([]byte, 128*1024)
-		n, err := io.CopyBuffer(clientConn, upstreamConn, buf)
+		defer tunnelBufPool.Put(buf2)
+		n, err := io.CopyBuffer(clientConn, upstreamConn, *buf2)
 		p.tracef("[Tunnel] Upstream -> Client: %d bytes, err: %v", n, err)
 		clientConn.Close()
 	}()
@@ -1739,6 +2240,7 @@ func (p *ProxyServer) generateCert(host string, caCert *x509.Certificate, caKey 
 	}
 
 	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certDER})
+	caPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: caCert.Raw})
 
 	keyBytes, err := x509.MarshalECPrivateKey(privKey)
 	if err != nil {
@@ -1746,7 +2248,7 @@ func (p *ProxyServer) generateCert(host string, caCert *x509.Certificate, caKey 
 	}
 	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyBytes})
 
-	cert, err := tls.X509KeyPair(certPEM, keyPEM)
+	cert, err := tls.X509KeyPair(append(certPEM, caPEM...), keyPEM)
 	if err != nil {
 		return nil, err
 	}
@@ -1819,7 +2321,7 @@ func (r *RuleManager) matchRule(host, mode string) Rule {
 		}
 	}
 
-	// If a specific rule matched
+	// If specific rule matched
 	if bestScore >= 0 {
 		if mode == "transparent" && best.Mode == "mitm" {
 			log.Printf("[RuleMatch] Global Transparent detected: Downgrading MITM rule (%s) to DIRECT to avoid cert errors.", host)
@@ -1830,7 +2332,7 @@ func (r *RuleManager) matchRule(host, mode string) Rule {
 		return best
 	}
 
-	// Auto-routing layer: when manual rules don't match, query AutoRouter
+	// Auto-route layer: when manual rules don't match, query AutoRouter
 	if r.autoRouter != nil && r.autoRoutingConfig.Mode != "" {
 		autoRule := r.autoRouter.Decide(host)
 		if autoRule.Mode != "direct" {
@@ -1851,6 +2353,37 @@ func (r *RuleManager) matchRule(host, mode string) Rule {
 
 func (p *ProxyServer) GetStats() (int64, int64, int64) {
 	return atomic.LoadInt64(&p.bytesDown), atomic.LoadInt64(&p.bytesUp), 0
+}
+
+func (p *ProxyServer) InitProcessMonitor() {
+	if p.procMonitor != nil {
+		return
+	}
+	port := 0
+	if addr := p.listenAddr; addr != "" {
+		_, s, _ := net.SplitHostPort(addr)
+		if p, err := strconv.Atoi(s); err == nil {
+			port = p
+		}
+	}
+	if port == 0 {
+		port = 8080
+	}
+	p.procMonitor = NewProcessMonitor(port)
+	p.procMonitor.SetTCPFetcher(newTCPFetcher(port))
+	p.procMonitor.SetPIDLister(getAllProcessPIDs)
+	go p.procMonitor.Start()
+}
+
+func (p *ProxyServer) StopProcessMonitor() {
+	if p.procMonitor != nil {
+		p.procMonitor.Stop()
+		p.procMonitor = nil
+	}
+}
+
+func (p *ProxyServer) GetProcessMonitor() *ProcessMonitor {
+	return p.procMonitor
 }
 
 func (p *ProxyServer) ClearCertCache() {
@@ -1916,7 +2449,6 @@ func ensureLegacyCloudflareProfile(profiles *[]ECHProfile) string {
 		if existing.DiscoveryDomain == "" {
 			existing.DiscoveryDomain = "crypto.cloudflare.com"
 		}
-		existing.AutoUpdate = true
 		return existing.ID
 	}
 
@@ -2000,30 +2532,22 @@ func (rm *RuleManager) applySettingsDefaults() {
 	if rm.listenPort == "" {
 		rm.listenPort = "8080"
 	}
-	if rm.cloudflareConfig.WarpEndpoint == "" {
-		rm.cloudflareConfig.WarpEndpoint = "162.159.199.2"
+	if rm.listenHost == "" {
+		rm.listenHost = "127.0.0.1"
 	}
-	if rm.cloudflareConfig.WarpSocksPort == 0 {
-		rm.cloudflareConfig.WarpSocksPort = 1080
+	if rm.socksAddr == "" {
+		rm.socksAddr = "127.0.0.1:1080"
+	}
+	if rm.socksHost == "" {
+		rm.socksHost = "127.0.0.1"
+	}
+	if rm.socksPort == "" {
+		rm.socksPort = "1080"
 	}
 	rm.tunConfig = normalizeTUNConfig(rm.tunConfig)
 }
 
-func normalizeTUNStack(stack string) string {
-	switch strings.ToLower(strings.TrimSpace(stack)) {
-	case "":
-		return "gvisor"
-	case "mixed":
-		return "mixed"
-	case "system", "gvisor":
-		return strings.ToLower(strings.TrimSpace(stack))
-	default:
-		return "gvisor"
-	}
-}
-
 func normalizeTUNConfig(cfg TUNConfig) TUNConfig {
-	cfg.Stack = normalizeTUNStack(cfg.Stack)
 	if cfg.MTU <= 0 {
 		cfg.MTU = 9000
 	}
@@ -2050,16 +2574,44 @@ func (rm *RuleManager) loadSettingsConfig() error {
 		return err
 	}
 
-	rm.cloudflareConfig = config.CloudflareConfig
-	rm.tunConfig = config.TUN
-	rm.serverHost = config.ServerHost
-	rm.serverAuth = config.ServerAuth
-	rm.listenPort = config.ListenPort
-	rm.autoRoutingConfig = config.AutoRouting
+	// 1. Set internal defaults first
 	rm.closeToTray = true
 	rm.autoStart = false
 	rm.showMainOnAutoStart = true
 	rm.autoEnableProxyOnAutoStart = false
+
+	// 2. Override with JSON values if they exist
+	rm.cloudflareConfig = config.CloudflareConfig
+	rm.tunConfig = config.TUN
+	rm.serverHost = config.ServerHost
+	rm.serverAuth = config.ServerAuth
+	if config.ListenPort != "" {
+		rm.listenPort = config.ListenPort
+	}
+	if config.ListenHost != "" {
+		rm.listenHost = config.ListenHost
+	}
+	if config.SocksAddr != "" {
+		rm.socksAddr = config.SocksAddr
+	}
+	if config.SocksHost != "" {
+		rm.socksHost = config.SocksHost
+	}
+	if config.SocksPort != "" {
+		rm.socksPort = config.SocksPort
+	}
+	// Backward compat: if SocksAddr is set but SocksHost/Port aren't, parse them
+	if config.SocksAddr != "" && config.SocksHost == "" && config.SocksPort == "" {
+		if h, p, err := net.SplitHostPort(config.SocksAddr); err == nil {
+			rm.socksHost = h
+			rm.socksPort = p
+		}
+	}
+	rm.autoRoutingConfig = config.AutoRouting
+	rm.language = config.Language
+	rm.theme = config.Theme
+	rm.country = config.Country
+
 	if config.CloseToTray != nil {
 		rm.closeToTray = *config.CloseToTray
 	}
@@ -2092,7 +2644,12 @@ func (rm *RuleManager) loadRulesConfig() error {
 
 	rm.siteGroups = config.SiteGroups
 	rm.upstreams = config.Upstreams
+	rm.dnsNodes = config.DNSNodes
 	rm.echProfiles = config.ECHProfiles
+	// Ensure at least the default Ali DoH bootstrap node exists
+	if len(rm.dnsNodes) == 0 {
+		rm.dnsNodes = defaultDNSNodes()
+	}
 	return nil
 }
 
@@ -2106,11 +2663,205 @@ func (rm *RuleManager) saveDefaultSettingsConfig() error {
 }
 
 func (rm *RuleManager) saveDefaultRulesConfig() error {
-	rm.siteGroups = []SiteGroup{}
+	rm.siteGroups = []SiteGroup{
+		{
+			ID:       "google-youtube-full",
+			Name:     "کامل گوگل و یوتیوب",
+			Website:  "google",
+			Domains:  defaultGoogleDomains(),
+			Mode:     "mitm",
+			Upstream: "216.239.38.120:443",
+			SniFake:  "www.google.com",
+			Enabled:  true,
+			CertVerify: CertVerifyConfig{
+				Mode: "allow_names",
+				Names: []string{
+					"*.google.com", "*.youtube.com", "*.googlevideo.com",
+					"*.googleapis.com", "*.ytimg.com", "*.ggpht.com",
+					"*.gstatic.com", "*.googleusercontent.com", "*.googleadservices.com",
+					"*.googlesyndication.com", "*.doubleclick.net", "*.blogger.com",
+					"*.blogspot.com", "*.youtu.be", "*.gmail.com",
+					"*.android.com", "*.firebase.com", "*.cloud.google.com",
+					"*.appspot.com", "*.flutter.dev", "*.dartlang.org",
+					"*.golang.org", "*.googlesource.com", "*.1e100.net",
+				},
+			},
+		},
+		{
+			ID:      "google-direct-rules",
+			Name:    "Google Direct Access",
+			Website: "google-direct",
+			Domains: []string{
+				"gemini.google.com", "aistudio.google.com", "notebooklm.google.com",
+				"labs.google.com", "meet.google.com", "accounts.google.com",
+				"ogs.google.com", "mail.google.com", "calendar.google.com",
+				"drive.google.com", "docs.google.com", "chat.google.com",
+				"photos.google.com", "maps.google.com", "myaccount.google.com",
+				"contacts.google.com", "classroom.google.com", "keep.google.com",
+				"play.google.com", "translate.google.com", "assistant.google.com",
+				"lens.google.com",
+			},
+			Mode:     "direct",
+			Upstream: "direct",
+			SniFake:  "",
+			Enabled:  true,
+		},
+		{
+			ID:      "sni-rewrite-domains",
+			Name:    "SNI Rewrite Domains",
+			Website: "sni-rewrite",
+			Domains: []string{
+				"*.youtube.com", "*.youtu.be", "*.youtube-nocookie.com",
+				"*.ytimg.com", "*.ggpht.com", "*.gvt1.com", "*.gvt2.com",
+				"*.doubleclick.net", "*.googlesyndication.com", "*.googleadservices.com",
+				"*.google-analytics.com", "*.googletagmanager.com", "*.googletagservices.com",
+				"fonts.googleapis.com", "script.google.com",
+			},
+			Mode:     "mitm",
+			Upstream: "216.239.38.120:443",
+			SniFake:  "www.google.com",
+			Enabled:  true,
+		},
+	}
 	rm.upstreams = []Upstream{}
+	rm.dnsNodes = defaultDNSNodes()
 	rm.echProfiles = []ECHProfile{}
 	rm.buildRules()
 	return rm.saveRulesConfig()
+}
+
+func defaultDNSNodes() []DNSNode {
+	return []DNSNode{}
+}
+
+func defaultGoogleDomains() []string {
+	return []string{
+		"*.google.com", "*.googleapis.com", "*.googlevideo.com",
+		"*.youtube.com", "*.ytimg.com", "*.ggpht.com",
+		"*.googleusercontent.com", "*.gstatic.com", "*.yt3.ggpht.com",
+		"*.googleadservices.com", "*.googlesyndication.com", "*.google-analytics.com",
+		"*.doubleclick.net", "*.blogger.com", "*.blogspot.com",
+		"*.googleblog.com", "*.youtu.be", "*.gmail.com",
+		"*.googlemail.com", "*.withgoogle.com", "*.goo.gl",
+		"*.app.goo.gl", "*.chrome.com", "*.chromium.org",
+		"*.g.co", "*.android.com", "*.androidify.com",
+		"*.waymo.com", "*.nest.com", "*.fitbit.com",
+		"*.wearos.com", "*.adsense.com", "*.admob.com",
+		"*.firebase.com", "*.firebaseio.com", "*.firebaseapp.com",
+		"*.cloud.google.com", "*.appspot.com", "*.googleapi.com",
+		"*.googleapiclient.com", "*.googlecode.com", "*.flutter.dev",
+		"*.dartlang.org", "*.golang.org", "*.googlesource.com",
+		"*.googlehosted.com", "*.googlezip.net", "*.googlecommerce.com",
+		"*.googletagmanager.com", "*.googleoptimize.com", "*.googleweblight.com",
+		"*.googlelabs.com", "*.google.info", "*.google.net",
+		"*.google.org", "*.google.eu", "*.1e100.net",
+		"*.withyoutube.com", "*.youtubekids.com", "*.youtubeeducation.com",
+		"*.googletraveladservices.com", "*.googlegroups.com", "*.googlechat.com",
+		"*.googleplus.com", "*.googlehangouts.com", "*.googleplay.com",
+		"*.googledrive.com", "*.googlephotos.com", "*.googlecalendar.com",
+		"*.googlekeep.com", "*.googlepodcasts.com", "*.googlebooks.com",
+		"*.googlenews.com", "*.googlefinance.com", "*.googletranslate.com",
+		"*.googlemaps.com", "*.googleearth.com", "*.googleclassroom.com",
+		"*.googlemeet.com", "*.googleforms.com", "*.googleslides.com",
+		"*.googlesites.com", "*.googledocs.com", "*.googlesheets.com",
+		"*.googleads.google.com", "*.googlehosted.com", "*.googlezip.net",
+		"*.googlecommerce.com", "*.googletagmanager.com", "*.googleoptimize.com",
+		"*.googleweblight.com", "*.googlelabs.com", "*.google.info",
+		"*.google.net", "*.google.org", "*.google.eu",
+		"*.google.us", "*.google.co", "*.google.ac",
+		"*.google.ad", "*.google.ae", "*.google.af",
+		"*.google.ag", "*.google.ai", "*.google.al",
+		"*.google.am", "*.google.ao", "*.google.ar",
+		"*.google.as", "*.google.at", "*.google.au",
+		"*.google.az", "*.google.ba", "*.google.bd",
+		"*.google.be", "*.google.bf", "*.google.bg",
+		"*.google.bh", "*.google.bi", "*.google.bj",
+		"*.google.bn", "*.google.bo", "*.google.br",
+		"*.google.bs", "*.google.bt", "*.google.bw",
+		"*.google.by", "*.google.bz", "*.google.ca",
+		"*.google.cc", "*.google.cd", "*.google.cf",
+		"*.google.cg", "*.google.ch", "*.google.ci",
+		"*.google.cl", "*.google.cm", "*.google.cn",
+		"*.google.co.ao", "*.google.co.bw", "*.google.co.ck",
+		"*.google.co.cr", "*.google.co.id", "*.google.co.il",
+		"*.google.co.in", "*.google.co.jp", "*.google.co.ke",
+		"*.google.co.kr", "*.google.co.ls", "*.google.co.ma",
+		"*.google.co.nz", "*.google.co.th", "*.google.co.tz",
+		"*.google.co.ug", "*.google.co.uk", "*.google.co.uz",
+		"*.google.co.ve", "*.google.co.vi", "*.google.co.za",
+		"*.google.co.zm", "*.google.co.zw", "*.google.com.af",
+		"*.google.com.ag", "*.google.com.ai", "*.google.com.ar",
+		"*.google.com.au", "*.google.com.bd", "*.google.com.bh",
+		"*.google.com.bn", "*.google.com.bo", "*.google.com.br",
+		"*.google.com.by", "*.google.com.bz", "*.google.com.cn",
+		"*.google.com.co", "*.google.com.cu", "*.google.com.cy",
+		"*.google.com.do", "*.google.com.ec", "*.google.com.eg",
+		"*.google.com.et", "*.google.com.fj", "*.google.com.gh",
+		"*.google.com.gi", "*.google.com.gt", "*.google.com.hk",
+		"*.google.com.jm", "*.google.com.jo", "*.google.com.kh",
+		"*.google.com.kw", "*.google.com.lb", "*.google.com.lc",
+		"*.google.com.ly", "*.google.com.mt", "*.google.com.mx",
+		"*.google.com.my", "*.google.com.na", "*.google.com.nf",
+		"*.google.com.ng", "*.google.com.ni", "*.google.com.np",
+		"*.google.com.nr", "*.google.com.om", "*.google.com.pa",
+		"*.google.com.pe", "*.google.com.ph", "*.google.com.pk",
+		"*.google.com.pl", "*.google.com.pr", "*.google.com.py",
+		"*.google.com.qa", "*.google.com.ru", "*.google.com.sa",
+		"*.google.com.sb", "*.google.com.sg", "*.google.com.sl",
+		"*.google.com.sv", "*.google.com.tj", "*.google.com.tr",
+		"*.google.com.tw", "*.google.com.ua", "*.google.com.uy",
+		"*.google.com.vc", "*.google.com.ve", "*.google.com.vn",
+		"*.google.cv", "*.google.cz", "*.google.de",
+		"*.google.dj", "*.google.dk", "*.google.dm",
+		"*.google.dz", "*.google.ee", "*.google.es",
+		"*.google.fi", "*.google.fm", "*.google.fr",
+		"*.google.ga", "*.google.ge", "*.google.gf",
+		"*.google.gg", "*.google.gl", "*.google.gn",
+		"*.google.gp", "*.google.gr", "*.google.gy",
+		"*.google.hn", "*.google.hr", "*.google.ht",
+		"*.google.hu", "*.google.ie", "*.google.im",
+		"*.google.io", "*.google.iq", "*.google.is",
+		"*.google.it", "*.google.je", "*.google.jo",
+		"*.google.jobs", "*.google.jp", "*.google.kg",
+		"*.google.ki", "*.google.kz", "*.google.la",
+		"*.google.li", "*.google.lk", "*.google.lt",
+		"*.google.lu", "*.google.lv", "*.google.md",
+		"*.google.me", "*.google.mg", "*.google.mk",
+		"*.google.ml", "*.google.mn", "*.google.ms",
+		"*.google.mu", "*.google.mv", "*.google.mw",
+		"*.google.ne", "*.google.nf", "*.google.nl",
+		"*.google.no", "*.google.nr", "*.google.nu",
+		"*.google.off.ai", "*.google.pk", "*.google.pl",
+		"*.google.pn", "*.google.ps", "*.google.pt",
+		"*.google.ro", "*.google.rs", "*.google.ru",
+		"*.google.rw", "*.google.sc", "*.google.se",
+		"*.google.sh", "*.google.si", "*.google.sk",
+		"*.google.sm", "*.google.sn", "*.google.so",
+		"*.google.st", "*.google.td", "*.google.tg",
+		"*.google.tk", "*.google.tl", "*.google.tm",
+		"*.google.tn", "*.google.to", "*.google.tt",
+		"*.google.us", "*.google.uz", "*.google.vg",
+		"*.google.vu", "*.google.ws", "*.google.cat",
+		"google.com", "youtube.com", "googleblog.com",
+		"blogger.com", "blogspot.com", "youtu.be",
+		"gmail.com", "googlemail.com", "ggpht.com",
+		"googlevideo.com", "ytimg.com", "googleusercontent.com",
+		"googleapis.com", "gstatic.com", "yt3.ggpht.com",
+		"googleadservices.com", "googlesyndication.com", "google-analytics.com",
+		"doubleclick.net", "withgoogle.com", "goo.gl",
+		"app.goo.gl", "chrome.com", "chromium.org",
+		"g.co", "android.com", "androidify.com",
+		"waymo.com", "nest.com", "fitbit.com",
+		"wearos.com", "adsense.com", "admob.com",
+		"firebase.com", "firebaseio.com", "firebaseapp.com",
+		"cloud.google.com", "appspot.com", "googleapi.com",
+		"googleapiclient.com", "googlecode.com", "flutter.dev",
+		"dartlang.org", "golang.org", "googlesource.com",
+		"googlehosted.com", "googlezip.net", "googlecommerce.com",
+		"googletagmanager.com", "googleoptimize.com", "googleweblight.com",
+		"googlelabs.com", "google.info", "google.net",
+		"google.org", "google.eu",
+	}
 }
 
 func (rm *RuleManager) buildRules() {
@@ -2179,9 +2930,7 @@ func (rm *RuleManager) buildRules() {
 				SiteID:             sg.ID,
 				ECHEnabled:         sg.ECHEnabled,
 				ECHProfileID:       sg.ECHProfileID,
-				ECHDomain:          sg.ECHDomain,
 				UseCFPool:          sg.UseCFPool,
-				ECHConfig:          echConfigBytes,
 				ECHDiscoveryDomain: echProfile.DiscoveryDomain,
 				ECHDoHUpstream:     echProfile.DoHUpstream,
 				ECHAutoUpdate:      echProfile.AutoUpdate,
@@ -2227,6 +2976,58 @@ func (rm *RuleManager) GetListenPort() string {
 func (rm *RuleManager) SetListenPort(port string) {
 	rm.mu.Lock()
 	rm.listenPort = port
+	rm.mu.Unlock()
+}
+
+func (rm *RuleManager) GetListenHost() string {
+	rm.mu.RLock()
+	defer rm.mu.RUnlock()
+	return rm.listenHost
+}
+
+func (rm *RuleManager) SetListenHost(host string) {
+	rm.mu.Lock()
+	rm.listenHost = host
+	rm.mu.Unlock()
+}
+
+func (rm *RuleManager) GetSocksAddr() string {
+	rm.mu.RLock()
+	defer rm.mu.RUnlock()
+	return rm.socksAddr
+}
+
+func (rm *RuleManager) SetSocksAddr(addr string) {
+	rm.mu.Lock()
+	rm.socksAddr = addr
+	if h, p, err := net.SplitHostPort(addr); err == nil {
+		rm.socksHost = h
+		rm.socksPort = p
+	}
+	rm.mu.Unlock()
+}
+
+func (rm *RuleManager) GetSocksHost() string {
+	rm.mu.RLock()
+	defer rm.mu.RUnlock()
+	return rm.socksHost
+}
+
+func (rm *RuleManager) SetSocksHost(host string) {
+	rm.mu.Lock()
+	rm.socksHost = host
+	rm.mu.Unlock()
+}
+
+func (rm *RuleManager) GetSocksPort() string {
+	rm.mu.RLock()
+	defer rm.mu.RUnlock()
+	return rm.socksPort
+}
+
+func (rm *RuleManager) SetSocksPort(port string) {
+	rm.mu.Lock()
+	rm.socksPort = port
 	rm.mu.Unlock()
 }
 
@@ -2309,6 +3110,51 @@ func (rm *RuleManager) SetAutoEnableProxyOnAutoStart(enabled bool) error {
 	rm.autoEnableProxyOnAutoStart = enabled
 	rm.mu.Unlock()
 	return rm.saveSettingsConfig()
+}
+
+func (r *RuleManager) GetLanguage() string {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.language
+}
+
+func (r *RuleManager) SetLanguage(lang string) error {
+	r.mu.Lock()
+	r.language = lang
+	r.mu.Unlock()
+	return r.saveSettingsConfig()
+}
+
+func (r *RuleManager) GetTheme() string {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if r.theme == "" {
+		return "light" // Default to light
+	}
+	return r.theme
+}
+
+func (r *RuleManager) SetTheme(theme string) error {
+	r.mu.Lock()
+	r.theme = theme
+	r.mu.Unlock()
+	return r.saveSettingsConfig()
+}
+
+func (r *RuleManager) GetCountry() string {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if r.country == "" {
+		return "iran" // Default to Iran
+	}
+	return r.country
+}
+
+func (r *RuleManager) SetCountry(country string) error {
+	r.mu.Lock()
+	r.country = country
+	r.mu.Unlock()
+	return r.saveSettingsConfig()
 }
 
 func (rm *RuleManager) UpdateCloudflareConfig(cfg CloudflareConfig) error {
@@ -2406,10 +3252,108 @@ func (rm *RuleManager) DeleteUpstream(id string) error {
 	return rm.saveRulesConfig()
 }
 
+// --- DNS Node CRUD ---
+
+func (rm *RuleManager) GetDNSNodes() []DNSNode {
+	rm.mu.RLock()
+	defer rm.mu.RUnlock()
+	if rm.dnsNodes == nil {
+		return []DNSNode{}
+	}
+	out := make([]DNSNode, len(rm.dnsNodes))
+	copy(out, rm.dnsNodes)
+	return out
+}
+
+func (rm *RuleManager) AddDNSNode(n DNSNode) error {
+	rm.mu.Lock()
+	defer rm.mu.Unlock()
+
+	n.ID = generateID()
+	rm.dnsNodes = append(rm.dnsNodes, n)
+	return rm.saveRulesConfig()
+}
+
+func (rm *RuleManager) UpdateDNSNode(n DNSNode) error {
+	rm.mu.Lock()
+	defer rm.mu.Unlock()
+
+	for i, node := range rm.dnsNodes {
+		if node.ID == n.ID {
+			rm.dnsNodes[i] = n
+			break
+		}
+	}
+	return rm.saveRulesConfig()
+}
+
+func (rm *RuleManager) DeleteDNSNode(id string) error {
+	rm.mu.Lock()
+	defer rm.mu.Unlock()
+
+	for i, node := range rm.dnsNodes {
+		if node.ID == id {
+			rm.dnsNodes = append(rm.dnsNodes[:i], rm.dnsNodes[i+1:]...)
+			break
+		}
+	}
+	return rm.saveRulesConfig()
+}
+
+// SetDNSNodePriority reorders DNS nodes by moving the node with the given ID
+// to the specified target index (0-based). Nodes are queried in list order.
+func (rm *RuleManager) SetDNSNodePriority(id string, targetIndex int) error {
+	rm.mu.Lock()
+	defer rm.mu.Unlock()
+
+	srcIdx := -1
+	for i, node := range rm.dnsNodes {
+		if node.ID == id {
+			srcIdx = i
+			break
+		}
+	}
+	if srcIdx < 0 {
+		return fmt.Errorf("dns node %s not found", id)
+	}
+	if targetIndex < 0 {
+		targetIndex = 0
+	}
+	if targetIndex >= len(rm.dnsNodes) {
+		targetIndex = len(rm.dnsNodes) - 1
+	}
+	if srcIdx == targetIndex {
+		return nil
+	}
+
+	node := rm.dnsNodes[srcIdx]
+	rm.dnsNodes = append(rm.dnsNodes[:srcIdx], rm.dnsNodes[srcIdx+1:]...)
+	tail := append([]DNSNode{}, rm.dnsNodes[targetIndex:]...)
+	rm.dnsNodes = append(rm.dnsNodes[:targetIndex], node)
+	rm.dnsNodes = append(rm.dnsNodes, tail...)
+	return rm.saveRulesConfig()
+}
+
 func (rm *RuleManager) saveSettingsConfig() error {
 	listenPort := rm.listenPort
 	if listenPort == "" {
 		listenPort = "8080"
+	}
+	listenHost := rm.listenHost
+	if listenHost == "" {
+		listenHost = "127.0.0.1"
+	}
+	socksAddr := rm.socksAddr
+	if socksAddr == "" {
+		socksAddr = "127.0.0.1:1080"
+	}
+	socksHost := rm.socksHost
+	if socksHost == "" {
+		socksHost = "127.0.0.1"
+	}
+	socksPort := rm.socksPort
+	if socksPort == "" {
+		socksPort = "1080"
 	}
 	closeToTray := rm.closeToTray
 	autoStart := rm.autoStart
@@ -2417,14 +3361,12 @@ func (rm *RuleManager) saveSettingsConfig() error {
 	autoEnableProxyOnAutoStart := rm.autoEnableProxyOnAutoStart
 	cloudflareConfig := rm.cloudflareConfig
 	tunConfig := normalizeTUNConfig(rm.tunConfig)
-	if cloudflareConfig.WarpEndpoint == "" {
-		cloudflareConfig.WarpEndpoint = "162.159.199.2"
-	}
-	if cloudflareConfig.WarpSocksPort == 0 {
-		cloudflareConfig.WarpSocksPort = 1080
-	}
-	config := SettingsConfig{
+	settings := SettingsConfig{
 		ListenPort:                 listenPort,
+		ListenHost:                 listenHost,
+		SocksAddr:                  socksAddr,
+		SocksHost:                  socksHost,
+		SocksPort:                  socksPort,
 		ServerHost:                 rm.serverHost,
 		ServerAuth:                 rm.serverAuth,
 		CloseToTray:                &closeToTray,
@@ -2434,9 +3376,12 @@ func (rm *RuleManager) saveSettingsConfig() error {
 		CloudflareConfig:           cloudflareConfig,
 		AutoRouting:                rm.autoRoutingConfig,
 		TUN:                        tunConfig,
+		Language:                   rm.language,
+		Theme:                      rm.theme,
+		Country:                    rm.country,
 	}
 
-	data, err := json.MarshalIndent(config, "", "  ")
+	data, err := json.MarshalIndent(settings, "", "  ")
 	if err != nil {
 		return err
 	}
@@ -2456,6 +3401,7 @@ func (rm *RuleManager) saveRulesConfig() error {
 	config := RulesConfig{
 		SiteGroups:  rm.siteGroups,
 		Upstreams:   rm.upstreams,
+		DNSNodes:    rm.dnsNodes,
 		ECHProfiles: rm.echProfiles,
 	}
 
@@ -2525,6 +3471,51 @@ func generateID() string {
 	return fmt.Sprintf("%d", time.Now().UnixNano())
 }
 
+func (r *RuleManager) GetBinaryECHConfig(id string) []byte {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	for _, p := range r.echProfiles {
+		if p.ID == id {
+			data, err := base64.StdEncoding.DecodeString(p.Config)
+			if err == nil && len(data) > 0 {
+				return data
+			}
+			break
+		}
+	}
+	return nil
+}
+
+func (r *RuleManager) UpdateECHProfileConfig(profileID string, configBytes []byte) error {
+	if profileID == "" || len(configBytes) == 0 {
+		return nil
+	}
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	found := false
+	configBase64 := base64.StdEncoding.EncodeToString(configBytes)
+	for i := range r.echProfiles {
+		if r.echProfiles[i].ID == profileID {
+			if r.echProfiles[i].Config == configBase64 {
+				return nil // No change
+			}
+			r.echProfiles[i].Config = configBase64
+			found = true
+			break
+		}
+	}
+
+	if !found {
+		return fmt.Errorf("profile %s not found", profileID)
+	}
+
+	log.Printf("[RuleManager] ECH Profile %s updated via sync", profileID)
+	return r.saveRulesConfig()
+}
+
 func chooseUTLSClientHelloID(alpn string) utls.ClientHelloID {
 	if strings.EqualFold(strings.TrimSpace(alpn), "http/1.1") {
 		return utls.HelloFirefox_120
@@ -2532,6 +3523,9 @@ func chooseUTLSClientHelloID(alpn string) utls.ClientHelloID {
 	return utls.HelloChrome_120
 }
 
+// nextProtosForNegotiatedALPN returns the ALPN protocols to advertise to the client,
+// matching whatever the upstream negotiated. Both sides speaking the same protocol
+// is safe for directTunnel because the uTLS handshake does not pre-send h2 preface.
 func nextProtosForNegotiatedALPN(alpn string) []string {
 	if strings.EqualFold(strings.TrimSpace(alpn), "h2") {
 		return []string{"h2"}
@@ -2562,23 +3556,48 @@ func (p *ProxyServer) GetUConn(conn net.Conn, sni string, verifyName string, rul
 
 	verifyConn := buildVerifyConnection(verifyName, rule.CertVerify)
 
+	serverName := sni
+	if serverName == "" {
+		serverName = verifyName
+	}
+
+	skipVerify := allowInsecure
+	if rule.CertVerify.Mode != "" {
+		skipVerify = true
+	}
+
+	// Manual bypass check
+	if _, ok := p.certBypassMap.Load(normalizeHost(verifyName)); ok {
+		skipVerify = true
+		verifyConn = nil
+	}
+
+	// ECH mode verification:
+	// uTLS verifyServerCertificate has two branches:
+	//   echRejected=true  → outer cert (e.g. cloudflare-ech.com) is verified
+	//   echRejected=false → inner cert (e.g. cloudflare.com) is verified
+	//
+	// In both cases we set InsecureServerNameToVerify = "*" which tells uTLS
+	// to verify the CA trust chain but skip DNSName matching.
+	// This is correct because:
+	//   - The outer public_name is embedded in the ECH config (unknown to us)
+	//   - The inner name is authenticated by the ECH crypto binding itself
+	//   - We still want a valid CA chain to prevent MITM with rogue certs
+	if len(echConfig) > 0 {
+		skipVerify = false
+		verifyConn = nil
+	}
+
 	config := &utls.Config{
-		// ECH 下这里必须是内层真实 SNI。外层公开名由 ECHConfig 的 PublicName 驱动。
-		ServerName:                     sni,
-		InsecureSkipVerify:             allowInsecure,
+		ServerName:                     serverName,
+		InsecureSkipVerify:             skipVerify,
 		EncryptedClientHelloConfigList: echConfig,
 		NextProtos:                     nextProtos,
 		VerifyConnection:               verifyConn,
 	}
 
 	if len(echConfig) > 0 {
-		// In ECH mode, if the server rejects ECH, it will present the Public Name certificate instead of the real host's.
-		// We allow the verification to continue through this hook so we can extract retry configuration.
-		config.EncryptedClientHelloRejectionVerify = func(cs utls.ConnectionState) error {
-			// Return nil to allow verification of the outer Public Name certificate when ECH is rejected.
-			// utls internally validates certificate legitimacy against RootCAs, so security is maintained.
-			return nil
-		}
+		config.InsecureServerNameToVerify = "*"
 	}
 
 	clientHelloID := chooseUTLSClientHelloID(alpn)
@@ -2594,66 +3613,40 @@ func (p *ProxyServer) GetUConn(conn net.Conn, sni string, verifyName string, rul
 }
 
 func (p *ProxyServer) resolveRuleECHConfig(host string, rule Rule) []byte {
-	// 1. 优先检查内存中是否已有纠错后的热配置
-	if p.dohResolver != nil {
-		cacheKey := strings.TrimSpace(rule.ECHDomain)
-		if cacheKey == "" {
-			cacheKey = host
-		}
-		if val, ok := p.dohResolver.echCache.Load(cacheKey); ok {
-			if ech, ok := val.([]byte); ok && len(ech) > 0 {
-				log.Printf("[Upstream] Using hot-patched ECH config for %s (via %s)", host, cacheKey)
-				return ech
-			}
+	if !rule.ECHEnabled {
+		return nil
+	}
+
+	// 1. Load manually selected global Profile
+	if rule.ECHProfileID != "" {
+		data := p.rules.GetBinaryECHConfig(rule.ECHProfileID)
+		if len(data) > 0 {
+			log.Printf("[Upstream] Using manual ECH profile %s for %s", rule.ECHProfileID, host)
+			return data
 		}
 	}
 
+	// 2. Auto-update logic
 	if rule.ECHAutoUpdate {
 		lookupDomain := strings.TrimSpace(rule.ECHDiscoveryDomain)
-		if lookupDomain == "" {
-			lookupDomain = strings.TrimSpace(rule.ECHDomain)
-		}
 		if lookupDomain == "" {
 			lookupDomain = host
 		}
 
 		echCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
 		echConfig, err := p.FetchECH(echCtx, lookupDomain, strings.TrimSpace(rule.ECHDoHUpstream))
-		cancel()
 		if err == nil && len(echConfig) > 0 {
-			log.Printf("[Upstream] Refreshed ECH profile %s for %s via %s (%d bytes)", rule.ECHProfileID, host, lookupDomain, len(echConfig))
+			log.Printf("[Upstream] Initial ECH fetch success for %s, syncing to profile %s", host, rule.ECHProfileID)
+			if rule.ECHProfileID != "" {
+				p.UpdateECHProfileConfig(rule.ECHProfileID, echConfig)
+			}
 			return echConfig
 		}
-		if err != nil {
-			log.Printf("[Upstream] ECH profile refresh failed for %s via %s: %v", host, lookupDomain, err)
-		}
 	}
 
-	if len(rule.ECHConfig) > 0 {
-		log.Printf("[Upstream] Using stored ECH profile %s for %s (%d bytes)", rule.ECHProfileID, host, len(rule.ECHConfig))
-		return rule.ECHConfig
-	}
-
-	if p.dohResolver == nil {
-		return nil
-	}
-
-	echLookupDomain := strings.TrimSpace(rule.ECHDomain)
-	if echLookupDomain == "" {
-		echLookupDomain = host
-	}
-	log.Printf("[Upstream] Fetching ECH for %s (via %s)", host, echLookupDomain)
-	echCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	echConfig, err := p.dohResolver.ResolveECH(echCtx, echLookupDomain)
-	cancel()
-	if err != nil {
-		log.Printf("[Upstream] ECH lookup failed for %s via %s: %v", host, echLookupDomain, err)
-		return nil
-	}
-	if len(echConfig) > 0 {
-		log.Printf("[Upstream] ECH fetched for %s via %s (%d bytes)", host, echLookupDomain, len(echConfig))
-	}
-	return echConfig
+	return nil
 }
 
 func (p *ProxyServer) newQUICRoundTripper(host string, rule Rule) (*http3.Transport, error) {
@@ -2664,17 +3657,39 @@ func (p *ProxyServer) newQUICRoundTripper(host string, rule Rule) (*http3.Transp
 	}
 
 	sniHost := chooseUpstreamSNI(host, rule)
-	if strings.TrimSpace(sniHost) == "" {
+	if sniHost == "" {
 		sniHost = host
+	}
+
+	// Resolve ECH configuration
+	var echConfig []byte
+	if rule.ECHEnabled {
+		echConfig = p.resolveRuleECHConfig(host, rule)
+	}
+
+	// In ECH mode, ServerName must be the inner (real) target domain.
+	// The outer SNI is automatically derived from the ECH config's public name.
+	// In non-ECH mode, ServerName uses the chosen upstream SNI (which may be fake).
+	innerSNI := host
+	if len(echConfig) == 0 {
+		innerSNI = sniHost
 	}
 
 	verifyConn := buildVerifyConnection(host, rule.CertVerify)
 	tlsConfig := &tls.Config{
-		ServerName:         sniHost,
+		ServerName:         innerSNI,
 		NextProtos:         []string{"h3", "h3-29", "h3-32"},
 		InsecureSkipVerify: true,
 	}
-	if verifyConn != nil {
+
+	// Enable ECH if configuration is available
+	if len(echConfig) > 0 {
+		tlsConfig.EncryptedClientHelloConfigList = echConfig
+		tlsConfig.InsecureSkipVerify = false
+		log.Printf("[QUIC] ECH enabled host=%s innerSNI=%s echLen=%d", host, innerSNI, len(echConfig))
+	}
+
+	if verifyConn != nil && len(echConfig) == 0 {
 		tlsConfig.VerifyConnection = func(cs tls.ConnectionState) error {
 			peer := make([]*x509.Certificate, len(cs.PeerCertificates))
 			copy(peer, cs.PeerCertificates)
@@ -2706,7 +3721,8 @@ func (p *ProxyServer) newQUICRoundTripper(host string, rule Rule) (*http3.Transp
 			for _, candidate := range dialCandidates {
 				conn, err := quic.DialAddr(ctx, candidate, tlsCfg, cfg)
 				if err == nil {
-					log.Printf("[QUIC] H3 dial success host=%s addr=%s sni=%s alpn=%s", host, candidate, tlsCfg.ServerName, conn.ConnectionState().TLS.NegotiatedProtocol)
+					cs := conn.ConnectionState().TLS
+					log.Printf("[QUIC] H3 dial success host=%s addr=%s sni=%s alpn=%s echAccepted=%v", host, candidate, tlsCfg.ServerName, cs.NegotiatedProtocol, cs.ECHAccepted)
 					return conn, nil
 				}
 				errs = append(errs, fmt.Sprintf("%s: %v", candidate, err))
@@ -2940,15 +3956,15 @@ func (p *ProxyServer) handleServerMITM(clientConn net.Conn, host string, rule Ru
 	_ = srv.Serve(&singleConnListener{conn: clientTls, done: make(chan struct{})})
 }
 
-// establishUpstreamConn integrates multi-node dialing, optimized IP, uTLS handshake, and ECH auto-extraction logic
+// establishUpstreamConn integrates multi-node dialing, IP preference, uTLS handshake and ECH auto-extraction logic
 func (p *ProxyServer) establishUpstreamConn(host string, rule Rule, dialCandidates []string, initialALPN string) (net.Conn, string, error) {
-	// 1. 确定拨号地址
+	// 1. Determine dial address
 	ordered := dialCandidates
 	if len(ordered) == 0 {
 		ordered = []string{net.JoinHostPort(host, "443")}
 	}
 
-	// 2. Pre-compute handshake parameters (retry handshake per candidate sequentially)
+	// 2. Pre-calculate handshake parameters (retry handshake for each candidate)
 	sniHost := chooseUpstreamSNI(host, rule)
 
 	upstreamALPN := initialALPN
@@ -2958,9 +3974,9 @@ func (p *ProxyServer) establishUpstreamConn(host string, rule Rule, dialCandidat
 	// 3. 按候选逐个拨号+握手（关键：握手失败也要尝试下一个候选）
 	var errs []string
 	for _, addr := range ordered {
-		// [修正] 每个 IP 候选人都有 2 次机会（初始尝试 + 1 次原地纠错重试）
+		// [Fix] Each IP candidate gets 2 chances (initial try + 1 retry with correction)
 		for attempt := 0; attempt < 2; attempt++ {
-			// [Fix] Dynamically resolve ECH config to consume error-correction cache from previous attempt
+			// [Fix] Dynamically parse ECH config to use error-correction cache from previous attempt
 			var echConfig []byte
 			if rule.ECHEnabled {
 				echConfig = p.resolveRuleECHConfig(host, rule)
@@ -2975,7 +3991,7 @@ func (p *ProxyServer) establishUpstreamConn(host string, rule Rule, dialCandidat
 						p.cfPool.ReportFailure(h)
 					}
 				}
-				break // Dial failed, move to next IP without retry
+				break // dial failed, switch to next IP, no retry
 			}
 
 			targetSNI := sniHost
@@ -2988,11 +4004,11 @@ func (p *ProxyServer) establishUpstreamConn(host string, rule Rule, dialCandidat
 				log.Printf("[Upstream] WARNING: ECH is enabled for %s but NO ECH config available. Handshake will LEAK domain!", host)
 			}
 
-			allowInsecure := len(echConfig) == 0
+			allowInsecure := len(echConfig) == 0 && rule.CertVerify.IsZero()
 			uconn := p.GetUConn(rawConn, targetSNI, host, rule, allowInsecure, upstreamALPN, echConfig)
 			utlsErr := uconn.Handshake()
 			if utlsErr == nil {
-				// 握手成功，记录日志并返回
+				// Handshake successful, log and return
 				cs := uconn.ConnectionState()
 				peerCN := ""
 				peerSAN := ""
@@ -3002,7 +4018,7 @@ func (p *ProxyServer) establishUpstreamConn(host string, rule Rule, dialCandidat
 						peerSAN = cs.PeerCertificates[0].DNSNames[0]
 					}
 				}
-				log.Printf("[Upstream] uTLS handshake ok host=%s addr=%s targetSNI=%s alpn=%s echAccepted=%v peerCN=%s peerSAN0=%s", host, addr, targetSNI, cs.NegotiatedProtocol, cs.ECHAccepted, peerCN, peerSAN)
+				log.Printf("[Upstream] uTLS handshake ok host=%s addr=%s outerSNI=%s alpn=%s echAccepted=%v peerCN=%s peerSAN0=%s", host, addr, sniHost, cs.NegotiatedProtocol, cs.ECHAccepted, peerCN, peerSAN)
 				if rule.UseCFPool && p.cfPool != nil {
 					h, _, _ := net.SplitHostPort(addr)
 					if h != "" {
@@ -3012,24 +4028,41 @@ func (p *ProxyServer) establishUpstreamConn(host string, rule Rule, dialCandidat
 				return uconn, cs.NegotiatedProtocol, nil
 			}
 
-			// 握手失败，清理资源
+			// Handshake failed, cleanup resources
 			rawConn.Close()
 
-			// [ECH error correction and in-place retry logic]
+			// [ECH error correction and local retry logic]
 			var echErr *utls.ECHRejectionError
-			if errors.As(utlsErr, &echErr) && len(echErr.RetryConfigList) > 0 {
-				cacheKey := strings.TrimSpace(rule.ECHDomain)
-				if cacheKey == "" {
-					cacheKey = host
-				}
-				if p.dohResolver != nil {
-					log.Printf("[Upstream] ECH REJECTED by %s. Server provided RetryConfigs. Hot-patching cache for %s...", addr, cacheKey)
-					p.dohResolver.echCache.Store(cacheKey, echErr.RetryConfigList)
+			if errors.As(utlsErr, &echErr) {
+				if attempt == 0 && rule.ECHEnabled && p.dohResolver != nil {
+					log.Printf("[Upstream] ECH REJECTED by %s. Attempting proactive DNS refresh for %s...", addr, host)
 
-					// If retry attempts remain and failure was due to ECH rejection, retry in-place on same IP
-					if attempt == 0 {
-						log.Printf("[Upstream] Retrying connection to %s with updated ECH config (Attempt 2)...", addr)
+					// 1. Try synchronous ECH config refresh
+					refreshCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+					lookupDomain := rule.ECHDiscoveryDomain
+					if lookupDomain == "" {
+						lookupDomain = host
+					}
+					newECH, refreshErr := p.dohResolver.ResolveECHSafe(refreshCtx, lookupDomain)
+					cancel()
+
+					if refreshErr == nil && len(newECH) > 0 {
+						log.Printf("[Upstream] Successfully refreshed ECH for %s via DNS. Syncing to profile and retrying...", host)
+						if rule.ECHProfileID != "" {
+							p.UpdateECHProfileConfig(rule.ECHProfileID, newECH)
+						}
+						// 第二次尝试将自动从 Profile 读取新配置
 						continue
+					}
+
+					// 2. If DNS refresh fails, try using uTLS provided RetryConfigList (if exists)
+					if len(echErr.RetryConfigList) > 0 {
+						log.Printf("[Upstream] DNS refresh failed, but RetryConfigs available. Retrying once with server-provided configs...")
+						// Note: since resolveRuleECHConfig is called at loop start,
+						// this in-place continue cannot directly inject RetryConfigList,
+						// unless we modify loop structure. For safety, we prioritize DNS refresh.
+						// If DNS didn't refresh, we choose to try next IP or report error,
+						// because RetryConfigList is only valid for current handshake, cannot be persisted.
 					}
 				}
 			}
@@ -3042,64 +4075,30 @@ func (p *ProxyServer) establishUpstreamConn(host string, rule Rule, dialCandidat
 					p.cfPool.ReportFailure(h)
 				}
 			}
-			break // Move to next IP
+			break // 换下一个 IP
 		}
 	}
 
 	if len(errs) == 0 {
 		return nil, "", fmt.Errorf("all candidates failed with unknown error")
 	}
-	return nil, "", fmt.Errorf("all candidates failed: %s", strings.Join(errs, "; "))
+
+	finalErr := fmt.Errorf("all candidates failed: %s", strings.Join(errs, "; "))
+
+	// Safe fallback logic: only support fallback to secure protocols
+	fallback := strings.ToLower(strings.TrimSpace(rule.FallbackMode))
+	if (fallback == "tls-rf" || fallback == "quic") && fallback != rule.Mode {
+		log.Printf("[Upstream] ECH/Primary connection failed for %s, falling back to secure mode: %s", host, fallback)
+		fallbackRule := rule
+		fallbackRule.Mode = fallback
+		fallbackRule.ECHEnabled = false 	// Since we already fell back, usually don't try ECH or let new mode handle it
+		return p.establishUpstreamConn(host, fallbackRule, dialCandidates, initialALPN)
+	}
+
+	return nil, "", finalErr
 }
 
 func (p *ProxyServer) dialWithRule(ctx context.Context, network, addr string, rule Rule) (net.Conn, error) {
-	p.mu.RLock()
-	wm := p.warpMgr
-	p.mu.RUnlock()
-
-	useWarp := false
-	if strings.ToLower(strings.TrimSpace(rule.Upstream)) == "warp" || strings.ToLower(strings.TrimSpace(rule.Mode)) == "warp" {
-		useWarp = true
-	}
-
-	if useWarp && wm != nil && p.rules.GetCloudflareConfig().WarpEnabled {
-		status := wm.GetStatus()
-		if !status.Running || !wm.IsReady() {
-			if !status.Running {
-				log.Printf("[Dial] Warp route requested for %s but tunnel is not running", addr)
-				return nil, fmt.Errorf("warp tunnel not running")
-			}
-
-			// Loop probing until ready (max wait ~2 seconds)
-			ready := false
-			for i := 0; i < 10; i++ {
-				if wm.IsReady() {
-					ready = true
-					break
-				}
-				time.Sleep(200 * time.Millisecond)
-			}
-
-			if !ready {
-				log.Printf("[Dial] Warp tunnel NOT ready after wait for %s", addr)
-				return nil, fmt.Errorf("warp tunnel not ready")
-			}
-			status = wm.GetStatus()
-		}
-
-		if status.Running {
-			proxyAddr := fmt.Sprintf("127.0.0.1:%d", wm.SocksPort)
-			dialer, err := proxy.SOCKS5("tcp", proxyAddr, nil, proxy.Direct)
-			if err == nil {
-				log.Printf("[Dial] Routing %s via Warp SOCKS5 (%s)", addr, proxyAddr)
-				return dialer.Dial(network, addr)
-			}
-			log.Printf("[Dial] Warp SOCKS5 dialer creation failed: %v", err)
-		} else {
-			log.Printf("[Dial] Warp is configured but NOT running for %s", addr)
-		}
-	}
-
 	// Default direct dialer
 	dialer := &net.Dialer{
 		Timeout:   10 * time.Second,
@@ -3110,16 +4109,13 @@ func (p *ProxyServer) dialWithRule(ctx context.Context, network, addr string, ru
 
 // FetchECH performs a one-off ECH resolution via DoH for a specific domain and upstream
 func (p *ProxyServer) FetchECH(ctx context.Context, domain string, dohURL string) ([]byte, error) {
-	if dohURL == "" {
-		if p.dohResolver != nil {
-			return p.dohResolver.ResolveECH(ctx, domain)
-		}
-		return nil, fmt.Errorf("no default DoH resolver available")
+	if p.dohResolver == nil {
+		return nil, fmt.Errorf("no DoH resolver available")
 	}
 
-	// Create a temporary resolver for the specific upstream
-	tempResolver := NewDoHResolver(dohURL)
-	return tempResolver.ResolveECH(ctx, domain)
+	// Now FetchECH ignores dohURL and just tries to resolve it with the global FailoverResolver.
+	// But we must prevent resolving Alidns or other bootstrap nodes themselves.
+	return p.dohResolver.ResolveECH(ctx, domain)
 }
 
 // --- Auto Routing ---
@@ -3146,10 +4142,10 @@ func (rm *RuleManager) GetAutoRouter() *AutoRouter {
 	return rm.autoRouter
 }
 
-func (rm *RuleManager) InitAutoRouter(dohResolver *DoHResolver) {
+func (rm *RuleManager) InitAutoRouter(resolver *FailoverResolver) {
 	rm.mu.Lock()
 	defer rm.mu.Unlock()
-	rm.autoRouter = NewAutoRouter(rm.autoRoutingConfig, dohResolver)
+	rm.autoRouter = NewAutoRouter(rm.autoRoutingConfig, resolver)
 
 	// Try loading cached GFW list
 	cachePath := gfwListCachePath(rm.rulesPath)
@@ -3208,4 +4204,6 @@ func (rm *RuleManager) GetAutoRoutingStatus() GFWListStatus {
 	}
 	return GFWListStatus{
 		Enabled: false,
-		Mode:    string(rm.autoRoutingConfig.Mod            
+		Mode:    string(rm.autoRoutingConfig.Mode),
+	}
+}

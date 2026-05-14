@@ -1,7 +1,9 @@
-package sysproxy
+package cert
 
 import (
+	"fmt"
 	"os/exec"
+	"strings"
 	"syscall"
 )
 
@@ -32,4 +34,30 @@ func startHiddenCommand(name string, args ...string) error {
 	cmd := exec.Command(name, args...)
 	hideWindow(cmd)
 	return cmd.Start()
+}
+// startVisibleCommand 启动命令并显示窗口
+func startVisibleCommand(name string, args ...string) error {
+	cmd := exec.Command(name, args...)
+	// 不设置 HideWindow = true
+	return cmd.Start()
+}
+
+func runElevatedCommand(name string, args ...string) error {
+	escape := func(s string) string {
+		return strings.ReplaceAll(s, "'", "''")
+	}
+
+	quotedArgs := make([]string, 0, len(args))
+	for _, arg := range args {
+		quotedArgs = append(quotedArgs, fmt.Sprintf("'%s'", escape(arg)))
+	}
+
+	psScript := fmt.Sprintf(
+		"$p = Start-Process -FilePath '%s' -ArgumentList @(%s) -Verb RunAs -Wait -PassThru; exit $p.ExitCode",
+		escape(name),
+		strings.Join(quotedArgs, ","),
+	)
+
+	cmd := exec.Command("powershell", "-NoProfile", "-Command", psScript)
+	return cmd.Run()
 }
