@@ -92,7 +92,7 @@ ProxyServer.handleConnect()
 ```
 cert/
 ├── cert.go           # تولید CA، بارگذاری، خروجی PEM، بازتولید
-├── installer.go      # نصب/حذف/بررسی CA در سیستم‌عامل
+├── installer.go      # نصب/حذف/بررسی CA در سیستمعامل
 └── exec_windows.go   # اجرای فرمان در ویندوز (hidden/elevated)
 
 proxy/
@@ -273,9 +273,12 @@ const WORKER_URL = "https://my-nova-relay.yourname.workers.dev";
 
 #### مرحله اول — راه‌اندازی اولیه
 
-۱. فایل `novaproxy.exe` را با دو کلیک باز کنید.
-۲. صفحه خوش‌آمدگویی نمایش داده می‌شود. یک **پاپ‌آپ** برای نصب گواهی (Certificate) مربوط به دو قابلیت نمایش داده می‌شود — آن را نصب کنید.
-۳. بعد از نصب گواهی:
+.
+فایل `novaproxy.exe` را با دو کلیک باز کنید.
+.
+صفحه خوش‌آمدگویی نمایش داده می‌شود. یک **پاپ‌آپ** برای نصب گواهی (Certificate) مربوط به دو قابلیت نمایش داده می‌شود — آن را نصب کنید.
+.
+بعد از نصب گواهی:
    - **کشور** را روی **Iran** قرار دهید.
    - **زبان** و **تم** مورد نظر را انتخاب کنید.
    - دکمه **Start** را بزنید.
@@ -292,24 +295,31 @@ const WORKER_URL = "https://my-nova-relay.yourname.workers.dev";
 
 برای استفاده از قابلیت **Google Apps Script**:
 
-۱. به صفحه **پروکسی** بروید.
-۲. در بخش مربوط به GSA، اطلاعات پیش‌فرض را ویرایش کرده و مقادیر جدید (Auth Key، Script ID، Worker URL) را وارد کنید.
-۳. دکمه **ذخیره** را بزنید.
-۴. به صفحه **مسیریابی** بروید و مسیریابی را روی **خودکار GSA** تنظیم کنید.
-   - سیستم به صورت خودکار بهترین IP را برای شما انتخاب می‌کند.
-۵. به صفحه **تنظیمات GSA** بروید و دکمه **اسکن IP** را بزنید تا بین IP‌های موجود، بهترین‌ها برای کار پیدا شوند.
+.
+به صفحه **پروکسی** بروید.
+.
+در بخش مربوط به GSA، اطلاعات پیش‌فرض را ویرایش کرده و مقادیر جدید (Auth Key، Script ID، Worker URL) را وارد کنید.
+.
+دکمه **ذخیره** را بزنید.
+.
+به صفحه **مسیریابی** بروید و مسیریابی را روی **خودکار GSA** تنظیم کنید. سیستم به صورت خودکار بهترین IP را برای شما انتخاب می‌کند.
+.
+به صفحه **تنظیمات GSA** بروید و دکمه **اسکن IP** را بزنید تا بین IP‌های موجود، بهترین‌ها برای کار پیدا شوند.
 
 #### شروع کار با GSA
 
 به صفحه **داشبورد** بروید و مراحل زیر را به ترتیب انجام دهید:
 
-۱. **پروکسی** را روشن کنید.
-۲. **پروکسی سیستم** را روشن کنید.
-۳. **کلید GSA** را روشن کنید.
+.
+**پروکسی** را روشن کنید.
+.
+**پروکسی سیستم** را روشن کنید.
+.
+**کلید GSA** را روشن کنید.
 
 حالا می‌توانید از مرورگر همه سایت‌ها را باز کنید — حتی **تلگرام وب** به خوبی کار می‌کند.
 
-> **توجه:** در حال حاضر برنامه‌های دسکتاپ مثل تلگرام ویندوز از داخل خود سیستم‌عامل از طریق GSA قابل استفاده نیستند، اما همه سایت‌ها در مرورگر به خوبی باز می‌شوند.
+> **توجه:** در حال حاضر برنامه‌های دسکتاپ مثل تلگرام ویندوز از داخل خود سیستمعامل از طریق GSA قابل استفاده نیستند، اما همه سایت‌ها در مرورگر به خوبی باز می‌شوند.
 
 ---
 
@@ -326,7 +336,7 @@ const WORKER_URL = "https://my-nova-relay.yourname.workers.dev";
 
 از [denuitt1](https://github.com/denuitt1) بابت ارائه این پروژه تشکر می‌شود.
 
-فرانت‌اند (بخش UI) این پروژه از فرانت‌اند پروژه [SniShaper](https://github.com/SniShaper/SniShaper) گرفته شده است. توجه داشته باشید که **SniShaper** برای دور زدن محدودیت‌های اینترنت چین (GFW) طراحی شده و معماری، هسته MITM و هسته GSA پروژه Nova هیچ ارتباط کدبیس یا وابستگی با آن پروژه ندارند. NovaProxy به طور خاص برای رفع محدودیت‌های اینترنت ایران توسعه یافته است.
+فرانت‌اند (بخش UI) این پروژه از فرانت‌اند پروژه [SniShaper](https://github.com/SniShaper/SniShaper) گرفته شده است. توجه داشته باشید که **SniShaper** برای دور زدن محدودیت‌های اینترنت چین طراحی شده و معماری، هسته MITM و هسته GSA پروژه Nova هیچ ارتباط کدبیس یا وابستگی با آن پروژه ندارند. NovaProxy به طور خاص برای رفع محدودیت‌های اینترنت ایران توسعه یافته است.
 
 از [SniShaper](https://github.com/SniShaper) بابت ارائه این فرانت‌اند تشکر می‌شود.
 
@@ -335,9 +345,6 @@ const WORKER_URL = "https://my-nova-relay.yourname.workers.dev";
 | شاخص | SniShaper | نوا پروکسی (Nova-Proxy-App) |
 |------|-----------|---------------------------|
 | **زبان اصلی** | Go 87%, TypeScript | Go, TypeScript (Wails v3) |
-| **ستاره‌ها (Stars)** | 72 | 34 (تا زمان بررسی) |
-| **آخرین بروزرسانی** | ۴ می ۲۰۲۶ (v1.26) | ۲ می ۲۰۲۶ (V1.0) |
-| **سیستم‌عامل پشتیبانی** | ویندوز، لینوکس (نسخه جداگانه) | ویندوز، مک، لینوکس |
 | **پشتیبانی از TUN Mode** | خیر | بله |
 | **پشتیبانی از Google Apps Script** | خیر | بله (GSA Relay) |
 | **تکنیک اصلی Bypass** | دستکاری ClientHello | MITM + Domain Fronting (GSA) |
@@ -682,7 +689,7 @@ The **GSA** section of this project is based on the initial version of [mhr-cfw-
 
 Thanks to [denuitt1](https://github.com/denuitt1) for providing this project.
 
-The frontend (UI) of this project is taken from the [SniShaper](https://github.com/SniShaper/SniShaper) project. Note that **SniShaper** is designed to bypass China's internet restrictions (GFW), and the MITM and GSA cores of Nova have no codebase relationship or dependency on that project. NovaProxy is specifically developed to bypass internet restrictions in Iran.
+The frontend (UI) of this project is taken from the [SniShaper](https://github.com/SniShaper/SniShaper) project. Note that **SniShaper** is designed to bypass China's internet restrictions, and the MITM and GSA cores of Nova have no codebase relationship or dependency on that project. NovaProxy is specifically developed to bypass internet restrictions in Iran.
 
 Thanks to [SniShaper](https://github.com/SniShaper) for providing this frontend.
 
@@ -691,9 +698,6 @@ Thanks to [SniShaper](https://github.com/SniShaper) for providing this frontend.
 | Metric | SniShaper | Nova-Proxy-App |
 |--------|-----------|----------------|
 | **Language** | Go 87%, TypeScript | Go, TypeScript (Wails v3) |
-| **Stars** | 72 | 34 (at time of writing) |
-| **Last Update** | May 4, 2026 (v1.26) | May 2, 2026 (V1.0) |
-| **Supported OS** | Windows, Linux (separate builds) | Windows, macOS, Linux |
 | **TUN Mode** | No | Yes |
 | **Google Apps Script** | No | Yes (GSA Relay) |
 | **Main Bypass Technique** | ClientHello manipulation | MITM + Domain Fronting (GSA) |
