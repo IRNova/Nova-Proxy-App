@@ -1,111 +1,171 @@
-<div dir="rtl" align="right">
+<div dir="rtl" style="font-family: 'Vazirmatn', sans-serif;">
+
+<div align="center">
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/IRNova/Nova-Proxy-App/main/logo.svg" width="140" height="140" alt="لوگوی نوواپراکسی">
+  <img src="https://raw.githubusercontent.com/IRNova/Nova-Proxy-App/main/logo.svg" width="140" height="140" alt="NovaProxy Logo">
 </p>
 
-<h1 align="center">نوواپراکسی</h1>
+<h1 style="color: #2c3e50; margin-top: 10px;">
+  نوواپراکسی
+</h1>
 
-<p align="center">
+<p style="font-size: 16px; color: #7f8c8d;">
   <strong>NovaProxy</strong> — پل هوشمند به اینترنت آزاد
-  <br>
-  <a href="https://t.me/irnova_proxy">📡 @irnova_proxy</a>
 </p>
 
-<p align="center">
-  <img src="https://img.shields.io/github/stars/IRNova/Nova-Proxy-App?style=social" alt="ستاره‌ها">
-</p>
+<hr style="width: 60px; border: 2px solid #e74c3c; border-radius: 4px;">
 
-<hr>
+</div>
 
-## معماری کلی
+---
 
-دو مسیر اصلی برای دسترسی به اینترنت آزاد در نوواپراکسی طراحی شده است:
+## معماری کلّی
 
-### ۱. مسیر GSA (Google Apps Script + Cloudflare Worker)
-┌──────────┐ ┌───────────────┐ ┌──────────────────┐ ┌──────────────────┐
-│ کلاینت │───>│ GSA Proxy │───>│ Google Apps │───>│ Cloudflare │
-│ (مرورگر) │ │ (پورت 8085) │ │ Script (Code.gs) │ │ Worker (worker) │
-└──────────┘ └───────────────┘ └──────────────────┘ └──────────────────┘
-│
-▼
-┌──────────────┐
-│ اینترنت آزاد │
-└──────────────┘
+در این پروژه دو مسیر اصلی برای دسترسی به اینترنت آزاد وجود دارد:
 
-text
+---
 
-**نحوه کار:**  
-کلاینت درخواست HTTP خود را به GSA Proxy محلی (پورت ۸۰۸۵) می‌فرستد. این پروکسی درخواست را به JSON تبدیل کرده و با کلید احراز به Google Apps Script ارسال می‌کند. سپس Apps Script درخواست را به Cloudflare Worker فوروارد می‌کند و Worker درخواست نهایی را به مقصد می‌زند. پاسخ از همان مسیر بازمی‌گردد.
+### مسیر GSA (Google Apps Script + Cloudflare Worker)
 
-### ۲. مسیر MITM (Google IP Direct)
-┌──────────┐ ┌──────────────────────┐ ┌───────────────────────┐
-│ کلاینت │───>│ آی‌پی‌های سفید گوگل │───>│ سایت‌های گوگل │
-│ (مرورگر) │ │ 216.239.38.120 │ │ یوتیوب، جستجو، جیمیل │
-└──────────┘ │ www.google.com │ │ گوگل‌درایو، مپس و... │
-└──────────────────────┘ └───────────────────────┘
+```
+┌──────────┐    ┌───────────────┐    ┌──────────────────┐    ┌──────────────────┐
+│          │    │               │    │                  │    │                  │
+│  کلاینت   │───>│ GSA Proxy     │───>│ Google Apps      │───>│ Cloudflare       │
+│ (مرورگر) │    │ (پورت 8085)   │    │ Script (Code.gs) │    │ Worker (worker)  │
+│          │<───│               │<───│                  │<───│                  │
+└──────────┘    └───────────────┘    └──────────────────┘    └──────────────────┘
+                                                     │
+                                                     ▼
+                                              ┌──────────────┐
+                                              │              │
+                                              │ اینترنت آزاد  │
+                                              │              │
+                                              └──────────────┘
+```
 
-text
+**نحوه کار:**
 
-در این مسیر، کلاینت مستقیماً به آی‌پی‌های سفید گوگل (لیست ۲۶ آی‌پی ثابت) متصل می‌شود. MITM Proxy ترافیک TLS را رمزگشایی کرده و همه سرویس‌های گوگل بدون فیلتر در دسترس خواهند بود.
+1. **کلاینت** درخواست HTTP خود را به **GSA Proxy Server** (محلی روی پورت ۸۰۸۵) می‌فرستد
+2. **GSA Proxy** درخواست را به JSON تبدیل کرده و با کلید احراز به **Google Apps Script** ارسال می‌کند  
+3. **Google Apps Script** (`server/Code.gs`) پکیج را به **Cloudflare Worker** فوروارد می‌کند
+4. **Cloudflare Worker** (`server/worker.js`) درخواست نهایی را به مقصد می‌زند:
+   - دریافت پاسخ (status, headers, body به صورت base64)
+   - پشتیبانی از **Upstream Forwarder** زنجیره‌ای
+   - شناسایی حلقه با هدر `x-relay-hop`
+   - مسدودسازی Self-Fetch
+   - تبدیل پاسخ به فرمت JSON
+5. پاسخ از همان مسیر برمی‌گردد: **Worker → Apps Script → GSA Proxy → کلاینت**
 
-<hr>
+> **نکته:** GSA یک پروکسی محلی ساده نیست — همه دیتا از طریق زیرساخت Google Apps Script و Cloudflare Worker ارسال و دریافت می‌شود.
+
+---
+
+### مسیر MITM (Google IP Direct)
+
+```
+┌──────────┐    ┌──────────────────────┐    ┌───────────────────────┐
+│          │    │                      │    │                       │
+│  کلاینت   │───>│  آی‌پی‌های سفید گوگل │───>│  سایت‌های گوگل        │
+│ (مرورگر) │    │  216.239.38.120     │    │  یوتیوب، جستجو، جیمیل  │
+│          │    │  www.google.com     │    │  گوگل‌درایو، مپس و... │
+└──────────┘    └──────────────────────┘    └───────────────────────┘
+```
+
+**نحوه کار:**
+
+- کلاینت به **آی‌پی‌های سفید گوگل** (لیست ۲۶ آی‌پی ثابت) متصل می‌شود
+- SNI به `www.google.com` تنظیم می‌شود (یا دامنه‌های مشابه)
+- MITM Proxy ترافیک TLS را رمزگشایی و بازرسی می‌کند
+- همه سایت‌های زیرمجموعه گوگل بدون فیلتر در دسترس هستند
+
+---
 
 ## هسته‌های پروژه
 
-| هسته | قابلیت‌ها |
-|------|------------|
-| **GSA Core** | رله HTTP/2 و HTTP/1.1، Batch Request (تا ۵۰ درخواست)، کش هوشمند ۵۰ مگابایت، Auto-Failover، Heartbeat، SNI Rewrite، MITM داخلی، Split Tunnel |
-| **Google Apps Script** (`server/Code.gs`) | اعتبارسنجی با AUTH_KEY، ارسال به Cloudflare Worker، پشتیبانی از Batch، فیلتر هدرهای Hop-by-Hop |
-| **Cloudflare Worker** (`server/worker.js`) | Upstream Forwarder زنجیره‌ای، تشخیص حلقه، مسدودسازی Self-Fetch، تبدیل base64 تکه‌تکه، Fallback به Direct |
-| **Proxy Core** | حالت‌های mitm/transparent/tls-rf/quic/direct/server، Cloudflare IP Pool، uTLS Fingerprinting، ECH، SOCKS5، TLS Fragmentation |
-| **Core Runtime** | فرآیند پشتیبان مجزا با RPC روی پورت ۱۸۹۳۳، مدیریت TUN، بارگذاری مجدد تنظیمات و گواهی |
-| **Auto Router** | مسیریاب خودکار بر اساس GFW List، تشخیص کلودفلر از طریق DoH، حالت‌های default/server/gsa |
-| **DNS Resolver** | DNS-over-HTTPS با Failover و Parallel Race، ECH Refresh خودکار، Safe Resolver |
-| **TUN Mode** | یکپارچه با Mihomo (Clash.Meta)، مسیریابی سطح سیستم، Fake-IP + DNS Hijack |
-| **Certificate Manager** | مدیریت گواهی CA برای MITM |
-| **uTLS** | فورک refraction-networking/utls برای شبیه‌سازی اثرانگشت TLS |
-| **Frontend** | رابط کاربری با Wails v3 + Vite + TypeScript + Tailwind CSS |
+### ۱. GSA Core
+ارسال و دریافت دیتا از طریق **Google Apps Script** و **Cloudflare Worker**:
+- رله HTTP/2 و HTTP/1.1 با Connection Pool
+- Batch Request (ارسال گروهی تا ۵۰ درخواست)
+- Response Cache (کش هوشمند ۵۰ مگابایت)
+- Auto-Failover بین آی‌پی‌های گوگل
+- Heartbeat (بررسی سلامت هر ۳۰ ثانیه)
+- Front Domain Rotation
+- Google IP Scanner (۲۶ آی‌پی ثابت + DNS)
+- SNI Rewrite (یوتیوب، دابل‌کلیک، گوگل آنالیتیکس)
+- CORS Injection
+- MITM داخلی با CA اختصاصی (یا CA نووا)
+- Split Tunnel (برنامه‌های خاص)
 
-<hr>
+### ۲. Google Apps Script (`server/Code.gs`)
+- دریافت درخواست‌های JSON از GSA Proxy
+- اعتبارسنجی با کلید احراز (`AUTH_KEY`)
+- ارسال به Cloudflare Worker (`WORKER_URL`)
+- پشتیبانی از Batch (پردازش گروهی)
+- فیلتر هدرهای Hop-by-Hop
 
-## نصب و استفاده
+### ۳. Cloudflare Worker (`server/worker.js`)
+- دریافت از Google Apps Script
+- درخواست HTTP واقعی به مقصد نهایی
+- پشتیبانی از **Upstream Forwarder** زنجیره‌ای
+- شناسایی حلقه (Loop Detection)
+- مسدودسازی Self-Fetch
+- تبدیل بدنه به base64 با تکه‌تکه کردن (جلوگیری از Stack Overflow)
+- Fallback به Direct در صورت خطای Upstream
 
-برای دانلود آخرین نسخه، به صفحه [Releases](https://github.com/IRNova/Nova-Proxy-App/releases) مراجعه کنید.
+### ۴. Proxy Core
+پروکسی HTTP/HTTPS با قابلیت‌های:
+- **حالت‌ها:** mitm, transparent, tls-rf, quic, direct, server
+- Cloudflare IP Pool با Health Check
+- uTLS Fingerprinting (Chrome, Firefox)
+- ECH (Encrypted Client Hello) با Auto-Refresh
+- SOCKS5 Proxy
+- TLS Fragmentation
+- Certificate Cache
 
-### پیش‌نیازها
-- سیستم‌عامل‌های ویندوز، لینوکس، macOS
-- دسترسی به اینترنت برای برقراری ارتباط با سرورهای گوگل
+### ۵. Core Runtime
+فرآیند پشتیبان مجزا با RPC روی پورت ۱۸۹۳۳:
+- مدیریت پروکسی و TUN
+- بارگذاری مجدد تنظیمات و گواهی
+- دسترسی ادمین برای TUN
 
-### راهنمای سریع
-1. فایل مناسب سیستم‌عامل خود را دانلود کنید.
-2. برنامه را اجرا کنید. (ممکن است نیاز به اجرا به عنوان مدیر/root باشد)
-3. پروکسی روی `127.0.0.1:8085` یا پورت دیگر در دسترس خواهد بود.
-4. مرورگر یا سیستم خود را روی این پروکسی تنظیم کنید.
+### ۶. Auto Router
+مسیریاب خودکار بر اساس GFW List:
+- تشخیص کلودفلر از طریق DoH
+- **حالت‌ها:** default, server (با Fallback), gsa
 
-> برای تنظیمات پیشرفته (TUN، Split Tunnel و ...) از رابط کاربری یا فایل کانفیگ استفاده کنید.
+### ۷. DNS Resolver (DoH Failover)
+DNS-over-HTTPS با Failover و Parallel Race:
+- ECH Refresh خودکار
+- Safe Resolver برای Circular Dependency
 
-<hr>
+### ۸. TUN Mode
+TUN از طریق Mihomo (Clash.Meta):
+- مسیریابی سطح سیستم
+- Fake-IP + DNS Hijack
 
-## مشارکت در توسعه
+### ۹. Certificate Manager
+مدیریت گواهی CA برای MITM
 
-ما از مشارکت شما استقبال می‌کنیم! لطفاً مراحل زیر را دنبال کنید:
-- فورک (Fork) مخزن
-- ایجاد شاخه (branch) برای تغییرات
-- ارسال درخواست Pull Request
-- رعایت اصول کدنویسی موجود
+### ۱۰. uTLS
+فورک refraction-networking/utls برای شبیه‌سازی اثرانگشت TLS
 
-<hr>
+### ۱۱. Frontend
+رابط کاربری با Wails v3 + Vite + TypeScript + Tailwind CSS
 
-## ستاره‌ها در طول زمان
+---
+
+## Stargazers over time
 
 [![Stargazers over time](https://starchart.cc/IRNova/Nova-Proxy-App.svg?variant=adaptive)](https://starchart.cc/IRNova/Nova-Proxy-App)
 
-<hr>
+---
 
-<p align="center">
-  ♥ نواپراکسی — پلی به اینترنت آزاد و امن<br>
-  <a href="https://t.me/irnova_proxy">کانال تلگرام</a>
-</p>
+<div align="center" style="margin-top: 40px;">
 
+<hr style="width: 40px; border: 1px solid #e74c3c;">
+
+<h4>نواپراکسی — <span style="color: #e74c3c;">♥</span></h4>
+<p>📡 <a href="https://t.me/irnova_proxy" style="color: #229ED9; text-decoration: none;">@irnova_proxy</a></p>
+</div>
 </div>
