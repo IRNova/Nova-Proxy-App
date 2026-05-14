@@ -1,211 +1,660 @@
-<div dir="rtl" align="right">
+<div dir="rtl">
 
-## درباره پروژه
+# نوواپراکسی (NovaProxy) - Cloudflare IP Shaper
 
-**نوا پروکسی** یک ابزار پروکسی محلی قدرتمند است که به‌طور ویژه برای محیط‌های شبکه‌ی پیچیده طراحی شده است. این ابزار با استفاده از جدیدترین فناوری‌ها از جمله **تزریق ECH**، **تکه‌تکه‌سازی TLS-RF**، **تونل GSA (Google Apps Script)** و **رله در حالت سرور (Server Mode)**، تجربه‌ای پایدار و امن را برای کاربران فراهم می‌کند.
+<p align="center">
+  <img src="build/appicon.png" alt="NovaProxy Logo" width="128"/>
+</p>
 
----
+<p align="center">
+  <strong>پروکسی هوشمند با پشتیبانی از MITM، Domain Fronting، TUN و ECH</strong>
+</p>
 
-## قابلیت‌های کلیدی
-
-| دسته | قابلیت | وضعیت | توضیحات |
-|------|--------|-------|---------|
-| **حالت‌های پروکسی** | Transparent (شفاف) | ✅ | تغییر رزولوشن DNS یا اتصال مستقیم بدون خاتمه نشست TLS |
-| | MITM (میانی) | ✅ | رمزگشایی درخواست با گواهی ریشه محلی و تغییر SNI یا تزریق ECH |
-| | QUIC (HTTP/3) | ✅ | بازپخش HTTP/3 با استفاده از quic-go برای دور زدن تشخیص SNI |
-| | TLS-RF | ✅ | تکه‌تکه‌سازی TLS برای اختلال در بازسازی بلادرنگ توسط فایروال |
-| | Server | ✅ | رله پروکسی معکوس با قابلیت پنهان‌سازی ترافیک و پالایش امنیتی |
-| | GSA | ✅ | تونل Google Apps Script با Domain Fronting و قابلیت Auto-Failover |
-| | Direct | ✅ | اتصال مستقیم بدون پردازش |
-| **مسیریابی خودکار** | Default Mode | ✅ | تطابق با GFWList، تشخیص خودکار کلودفلر، اعمال استراتژی بهینه |
-| | GSA Fallback | ✅ | مسیریابی دامنه‌های مسدود از طریق تونل GSA |
-| | Server Fallback | ✅ | اولویت‌دهی به ارسال ترافیک از طریق حالت Server |
-| **قابلیت‌های GSA** | Domain Fronting | ✅ | تونل زدن ترافیک از طریق Google Apps Script با دامنه‌های جبهه |
-| | Auto-Failover | ✅ | تغییر خودکار IP گوگل در صورت قطع اتصال |
-| | Rotate Front Domain | ✅ | چرخش خودکار دامنه‌های جبهه در بازه‌های زمانی مشخص |
-| | Google IP Scanner | ✅ | اسکن خودکار IPهای گوگل و انتخاب بهترین IP |
-| | SNI Rewrite | ✅ | بازنویسی SNI برای دامنه‌های یوتیوب و تبلیغات |
-| | Proxy Apps Filter | ✅ | فیلتر برنامه‌ها و مسیریابی انتخابی |
-| | Speed Test | ✅ | تست سرعت تونل GSA |
-| **امنیت و حریم خصوصی** | ECH Injection | ✅ | تزریق Encrypted Client Hello برای مخفی‌سازی SNI |
-| | Fake SNI | ✅ | جایگزینی SNI با دامنه مجاز برای دور زدن لیست سیاه GFW |
-| | Root Certificate | ✅ | نصب گواهی ریشه محلی برای رمزگشایی ترافیک MITM |
-| | Security Washing | ✅ | حذف هدرهای شناسایی و سیاست‌های محدودکننده CSP |
-| **تنظیمات پیشرفته** | Cloudflare IP Pool | ✅ | تست دوره‌ای IPهای لبه کلودفلر و انتخاب بهینه‌ترین IP |
-| | Upstream DoH | ✅ | استعلام IP با استفاده از DoH برای دقت بیشتر |
-| | Custom Rules | ✅ | قوانین سفارشی با الگوریتم اولویت‌بندی هوشمند |
-| | GeoIP & GeoSite | ✅ | تشخیص IPها و دامنه‌های ایرانی برای مسیریابی داخلی |
-| | SOCKS5 | ✅ | پشتیبانی از پروتکل SOCKS5 |
-| | TUN Flow | ✅ | مسیریابی در سطح هسته با پشتیبانی از UDP |
+<p align="center">
+  <img src="https://img.shields.io/badge/Go-1.25-blue" />
+  <img src="https://img.shields.io/badge/Platform-Windows-lightblue" />
+  <img src="https://img.shields.io/badge/UI-Wails_v3-purple" />
+  <img src="https://img.shields.io/badge/License-MIT-green" />
+</p>
 
 ---
 
-## شروع سریع
+## فهرست مطالب
 
-### 1. دانلود و اجرا
-آخرین نسخه را از بخش [Releases](https://github.com/IRNova/Nova-Proxy-App/releases) دانلود کرده و فایل `NovaProxy.exe` را اجرا کنید.
-### 2. نصب گواهی
-در رابط کاربری اصلی، روی «مدیریت گواهی» → «کلیک برای نصب مجدد گواهی» کلیک کنید. برای اطمینان، می‌توانید وجود گواهی را با دستور `certmgr.msc` -> «مراجع صدور گواهی ریشه قابل اعتماد» بررسی کنید.
-
-### 3. شروع پروکسی
-نرم‌افزار مجموعه غنی از قوانین رسمی را ارائه می‌دهد. همچنین می‌توانید قوانین دلخواه خود را در بخش «تنظیمات قوانین (Rule settings)» ایجاد کنید، سپس روی «شروع پروکسی (Start Proxy)» کلیک کنید.
-
----
-
-## حالت‌های اصلی پروکسی
-
-### 1. شفاف (مستقیم)
-- **معماری:** کلاینت -> گره بهینه‌سازی -> سایت مقصد
-- **اصل کار:** رزولوشن DNS محلی را تغییر می‌دهد یا مستقیماً به آی‌پی مقصد متصل می‌شود بدون آنکه نشست TLS را خاتمه دهد.
-
-### 2. میانی (MITM)
-- **معماری:** کلاینت -> نوا پروکسی (رمزگشایی با گواهی CA) -> سایت مقصد
-- **اصل کار:** درخواست را با استفاده از گواهی ریشه محلی رمزگشایی کرده، سپس SNI را تغییر می‌دهد یا از تزریق ECH استفاده می‌کند.
-- **پیش‌نیاز:** نصب گواهی ریشه محلی.
-
-### 3. QUIC (HTTP/3)
-- **معماری:** کلاینت -> بازپخش H3 محلی -> سایت مقصد
-- **اصل کار:** اتصال کلاینت به پروکسی به صورت HTTPS استاندارد است، اما اتصال پروکسی به مقصد به HTTP/3 اجباری می‌شود. از قابلیت scrambling کتابخانه quic-go برای دورزدن تشخیص SNI استفاده می‌کند.
-
-### 4. TLS-RF (تکه‌تکه‌سازی TLS)
-- **معماری:** کلاینت -> هاندشیک تکه‌تکه‌شده -> سایت مقصد
-- **اصل کار:** طرح سفارشی مبهم‌سازی ویژگی‌های هاندشیک TLS شامل تکه‌تکه‌سازی چندلایه و تداخل تأخیر زمانی.
-- **نکته:** نرخ موفقیت به روش DPI بستگی دارد و ممکن است با گذشت زمان کاهش یابد.
-
-### 5. سرور (رله پروکسی معکوس)
-- **معماری:** کلاینت -> گره بهینه‌سازی (Cloudflare Workers / VPS) -> سایت مقصد
-- **اصل کار:** از تغییر سفارشی در لایه ۷ با قالب `/{token}/{target_host}/{path}` استفاده می‌کند.
-- **مورد استفاده:** دور زدن مسدودیت مبتنی بر IP.
-
-### 6. GSA (Google Apps Script)
-- **معماری:** کلاینت -> تونل GSA -> Google IP -> سایت مقصد
-- **اصل کار:** با استفاده از Google Apps Script به عنوان رله، ترافیک از طریق زیرساخت گوگل تونل می‌شود (Domain Fronting). دارای Auto-Failover برای تغییر خودکار IP گوگل و Rotate Front Domain برای چرخش دامنه‌های جبهه.
-- **مورد استفاده:** دور زدن فیلترینگ سنگین با بهره‌گیری از زیرساخت گوگل.
-
-### 7. Direct (مستقیم)
-- **اصل کار:** اتصال مستقیم به سایت مقصد بدون هیچ‌گونه پردازش.
+1. [معرفی پروژه](#معرفی-پروژه)
+2. [معماری کلی سیستم](#معماری-کلی-سیستم)
+3. [هسته‌های اصلی](#هسته‌های-اصلی)
+   - [Proxy Core](#proxy-core)
+   - [GSA Core (Google Scripts Apps Domain Fronting)](#gsa-core)
+   - [Core Runtime (فرآیند پشتیبان)](#core-runtime)
+   - [Auto Router](#auto-router)
+   - [Rule Manager & Config](#rule-manager--config)
+   - [DNS Resolver (DoH Failover)](#dns-resolver)
+   - [TUN Mode (Mihomo)](#tun-mode)
+   - [Certificate Manager](#certificate-manager)
+   - [utls (TLS Fingerprinting)](#utls)
+   - [Frontend (UI)](#frontend)
+4. [نقشه راه GSA](#نقشه-راه-gsa)
+5. [نقشه راه کلی پروژه](#نقشه-راه-کلی-پروژه)
+6. [نحوه نصب و اجرا](#نحوه-نصب-و-اجرا)
+7. [ساختار دایرکتوری‌ها](#ساختار-دایرکتوری‌ها)
+8. [تکنولوژی‌های استفاده شده](#تکنولوژی‌های-استفاده-شده)
 
 ---
 
-## مسیریابی خودکار (Auto Routing)
+## معرفی پروژه
 
-ویژگی «مسیریابی خودکار» در نوا پروکسی طوری طراحی شده است که بیشتر وب‌سایت‌ها بدون نیاز به تنظیم دستی قابل اتصال باشند. سه حالت مسیریابی خودکار پشتیبانی می‌شود:
+**NovaProxy** یک پروکسی پیشرفته و دسکتاپی است که با زبان **Go** و فریمورک **Wails v3** ساخته شده است. این ابزار برای کاربرانی طراحی شده که نیاز به عبور هوشمند از محدودیت‌های اینترنتی دارند و از تکنیک‌های متنوعی مانند:
 
-- **حالت پیش‌فرض (Default Mode):** ابتدا با GFWList داخلی تطابق می‌دهد. اگر دامنه در لیست بود و متعلق به کلودفلر باشد، از MITM + ECH استفاده می‌کند؛ در غیر این صورت TLS-RF به کار می‌رود.
-- **حالت برگشت GSA (GSA Fallback Mode):** در صورت عدم موفقیت TLS-RF در سایت‌های مسدود غیرکلودفلری، ترافیک به تونل GSA هدایت می‌شود.
-- **حالت برگشت سرور (Server Fallback Mode):** اولویت ارسال ترافیک سایت‌های مسدود غیرکلودفلری با حالت Server است.
-
----
-
-## راهنمای قوانین سفارشی
-
-زمانی که قوانین داخلی نیازهای شما را برآورده نمی‌کند، می‌توانید قوانین را به صورت دستی بهینه کنید. برای این کار:
-
-1. **بررسی با ITDog:** قبل از تنظیم قوانین، به [ITDog Website Ping](https://www.itdog.cn/ping/) مراجعه کرده و دامنه مورد نظر را بررسی کنید.
-   - اگر IP رزولوشن شده متعلق به کلودفلر بود: در صفحه ECH نرم‌افزار، با یک کلیک به قانون اضافه کنید.
-   - اگر IP ثابت و غیرکلودفلری بود: IP خارجی را به عنوان «آدرس بالادستی» وارد کرده و از حالت MITM با تغییر SNI استفاده کنید.
-2. **انتخاب حالت پیشرفته:**
-   - اگر دامنه فرانتینگ مسدود شده است: به TLS-RF تغییر وضعیت دهید.
-   - اگر سایت از QUIC پشتیبانی می‌کند: به حالت QUIC مستقیم تغییر دهید.
-3. **تغییرات قوانین پس از کلیک روی «ذخیره تنظیمات» به صورت لحظه‌ای اعمال می‌شوند و نیازی به راه‌اندازی مجدد نرم‌افزار نیست.**
+- **MITM Proxy** با گواهی‌های داینامیک
+- **Domain Fronting** از طریق Google Apps Script (GSA)
+- **TLS Fragmentation (TLS-RF)** برای دور زدن Deep Packet Inspection
+- **TUN Mode** با هسته‌ی Mihomo (Clash.Meta)
+- **ECH (Encrypted Client Hello)** با پشتیبانی از Cloudflare
+- **Cloudflare IP Pool** با Health Check خودکار
+- **DNS-over-HTTPS** با Failover
+- **Auto Routing** مبتنی بر GFWList
+- **SOCKS5 Proxy**
+</div>
 
 ---
 
-## راهنمای پیکربندی GSA
+## معماری کلی سیستم
 
-### صفحه اختصاصی GSA
-صفحه GSA شامل تنظیمات کامل تونل Google Apps Script است:
-- **اسکنر IP گوگل:** اسکن خودکار IPهای گوگل و نمایش تأخیر هر کدام
-- **تنظیمات سرور:** پورت، هاست، شناسه اسکریپت، کلید احراز هویت
-- **دامنه‌های جبهه:** لیست دامنه‌های Fronting (پیش‌فرض: google.com, youtube.com, drive.google.com و ...)
-- **تنظیمات رله:** تأخیر، تایم‌اوت، حجم مجاز پاسخ
-- **Auto-Failover:** تغییر خودکار IP گوگل در صورت قطع اتصال
-- **Rotate Front Domain:** چرخش خودکار دامنه جبهه
-- **Proxy Apps:** فیلتر برنامه‌های منتخب
-- **SNI Rewrite:** بازنویسی SNI برای یوتیوب و تبلیغات
-- **LAN Sharing:** اشتراک‌گذاری تونل در شبکه محلی
-- **وضعیت اتصال:**实时 نمایش درخواست‌ها، پهنای باند، تأخیر و کش
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                         Wails v3 Desktop App                        │
+│  ┌─────────────┐  ┌──────────────┐  ┌───────────────────────────┐  │
+│  │   Frontend   │  │  System Tray │  │       Main Window         │  │
+│  │  (Svelte/TS) │  │  (Tray Icon) │  │  (Dashboard / Settings)   │  │
+│  └──────┬──────┘  └──────┬───────┘  └─────────────┬─────────────┘  │
+│         └────────────────┼────────────────────────┘                │
+│                          ▼                                         │
+│  ┌──────────────────────────────────────────────────────────────┐  │
+│  │                    App (Service Layer)                        │  │
+│  │  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌─────────────┐  │  │
+│  │  │ProxyServer│  │GSAManager│  │RuleManager│  │CertManager  │  │  │
+│  │  └────┬─────┘  └────┬─────┘  └────┬─────┘  └──────┬──────┘  │  │
+│  └───────┼──────────────┼─────────────┼────────────────┼─────────┘  │
+│          │              │             │                │            │
+│          ▼              ▼             ▼                ▼            │
+│  ┌──────────────────────────────────────────────────────────────┐  │
+│  │                  Core Client (RPC over TCP)                   │  │
+│  │              ┌─────────────────────────────────────┐         │  │
+│  │              │     127.0.0.1:18933 (TCP RPC)       │         │  │
+│  │              └─────────────────────────────────────┘         │  │
+│  └──────────────────────────────────────────────────────────────┘  │
+└─────────────────────────────────────────────────────────────────────┘
+                                    │
+                                    ▼
+┌─────────────────────────────────────────────────────────────────────┐
+│                    Core Runtime (Separate Process)                   │
+│  ┌──────────┐  ┌──────────┐  ┌─────────────┐  ┌────────────────┐  │
+│  │ProxyServer│  │RuleManager│  │CertManager   │  │External Mihomo │  │
+│  │ (MITM/..) │  │          │  │              │  │ (TUN Mode)    │  │
+│  └────┬─────┘  └──────────┘  └──────────────┘  └────────┬───────┘  │
+│       │                                                  │         │
+│       ▼                                                  ▼         │
+│  ┌──────────┐                                    ┌──────────────┐  │
+│  │ GSA Relay│                                    │ Mihomo Core  │  │
+│  │ (Domain  │                                    │ (Clash.Meta) │  │
+│  │Fronting) │                                    │ TUN + Route  │  │
+│  └──────────┘                                    └──────────────┘  │
+└─────────────────────────────────────────────────────────────────────┘
+```
 
----
+این پروژه دارای **معماری دو-فرآیندی (Dual-Process Architecture)** است:
 
-## راهنمای پیکربندی رابط کاربری
+1. **Desktop Process**: رابط کاربری Wails v3 (سرویس اصلی، منوی سیستمی، پنجره)
+2. **Core Process**: فرآیند پشتیبان با دسترسی ادمین (برای TUN و مدیریت پروکسی)
 
-**داشبورد اصلی:**
-- **شروع پروکسی:** با کلیک روی این دکمه، موتور رهگیری محلی راه‌اندازی می‌شود.
-- **پروکسی سیستمی:** به طور خودکار پروکسی HTTP/HTTPS سیستم را تنظیم می‌کند.
-- **وضعیت GSA:** نمایش وضعیت تونل GSA (روشن/خاموش) و آمار اتصال
-- **SOCKS5:** نمایش آدرس پروکسی SOCKS5
-
-**مدیریت قوانین:**
-- **سیستم اولویت هوشمند:** ترتیب اولویت به صورت دامنه دقیق > پیشوند رجکس > پسوند است.
-- **تغییر حالت:** برای هر گروه قانون می‌توانید از حالت‌های mitm، tls-rf، quic، server، gsa، transparent و direct انتخاب کنید.
-- **Fake SNI:** جایگزینی SNI با دامنه مجاز برای دور زدن مسدودیت SNI.
-
-**تنظیمات ECH:**
-- **نگاشت ECH:** به طور خودکار رکوردهای echconfig را برای دامنه‌های هدف دریافت و ذخیره می‌کند.
-- **Bootstrap ECH:** با فعال بودن، نرم‌افزار از DoH داخلی برای استعلام رکوردهای ECH دامنه‌های ناشناس استفاده می‌کند.
-
-**مخزن IP کلودفلر:**
-- **شتاب لبه:** با آزمایش دوره‌ای IPهای لبه مختلف کلودفلر، اتصال خود را به هوشمندی بهینه می‌کند.
-- **مدیریت IP:** در صورت افزایش تأخیر، می‌توانید مخزن IP را به صورت دستی به‌روزرسانی یا پاک کنید.
-
----
-
-## رفع اشکال و سوالات متداول
-
-| مشکل | علت | راه‌حل |
-|------|-----|--------|
-| **اتصال ناامن یا خطای گواهی** | فعال بودن MITM/QUIC بدون نصب گواهی ریشه محلی | کلیک روی «مدیریت گواهی» → «نصب مجدد گواهی» و ریستارت مرورگر |
-| **قوانین اعمال نمی‌شوند** | انقضای قوانین داخلی یا عدم فعال بودن پروکسی | بررسی دکمه «شروع پروکسی» و به‌روزرسانی دستی قوانین |
-| **مخزن IP کلودفلر بروز نمی‌شود** | مشکل در اتصال به IPهای لبه کلودفلر | بررسی اتصال شبکه و پاک کردن مخزن IP برای شروع مجدد جستجو |
-| **سازگاری ECH پیشرفته ندارد** | عدم پشتیبانی تمام وب‌سایت‌ها از ECH | تغییر حالت به MITM یا Server |
-| **اتصال GSA برقرار نمی‌شود** | IP گوگل مسدود یا اسکریپت نامعتبر | اسکن مجدد IP گوگل و بررسی اعتبار اسکریپت |
-
----
-
-## محدودیت‌های استفاده در ایران
-
-### سرویس‌ها و پروتکل‌های محدودشده
-| سرویس | وضعیت | توضیح |
-|-------|-------|-------|
-| **Google IPs** | ⚠️ محدود | IPهای گوگل ممکن است در بازه‌های زمانی مختلف توسط GFW مسدود یا محدود شوند |
-| **Google Apps Script** | ⚠️ محدود | دامنه `script.google.com` و `googleapis.com` ممکن است با تأخیر بالا در دسترس باشند |
-| **Cloudflare Workers** | ⚠️ محدود | دامنه `*.workers.dev` در ایران مسدود است |
-| **Cloudflare IP Pool** | ⚠️ محدود | برخی IPهای لبه کلودفلر ممکن است در ایران قابل دسترسی نباشند |
-| **ECH (TLS Encrypted SNI)** | ⚠️ محدود | پشتیبانی از ECH در CDNهای فعال در ایران محدود است |
-| **TLS-RF** | ⚠️ وابسته به DPI | نرخ موفقیت به نوع و نسخه DPI نصب‌شده در شبکه بستگی دارد |
-| **QUIC** | ⚠️ محدود | پروتکل QUIC ممکن است در برخی شبکه‌های ایران مسدود باشد |
-| **DoH (DNS over HTTPS)** | ⚠️ محدود | برخی سرورهای DoH خارجی در ایران قابل دسترسی نیستند |
-
-### راهکارهای پیشنهادی برای ایران
-- **اولویت با GSA:** در شرایط فیلترینگ سنگین، تونل GSA با Domain Fronting بالاترین نرخ موفقیت را دارد
-- **تنظیم Auto-Failover:** فعال کردن Auto-Failover در GSA برای تغییر خودکار IP گوگل
-- **چندین دامنه جبهه:** استفاده از لیست متنوع دامنه‌های جبهه (google.com, youtube.com, drive.google.com)
-- **ترکیب با Server Mode:** در صورت عدم کارایی GSA، از حالت Server با VPS خارجی استفاده کنید
-- **بروزرسانی منظم CF Pool:** مخزن IP کلودفلر را به‌روز نگه دارید
+ارتباط بین این دو از طریق **RPC روی TCP (پورت 18933)** انجام می‌شود.
 
 ---
 
-## حالت سرور (Server Mode)
+## هسته‌های اصلی
 
-حالت سرور یک مؤلفه اختیاری برای دور زدن مسدودیت مبتنی بر IP است و از یک رله سبک در لایه ۷ استفاده می‌کند.
+### Proxy Core
 
-### راه‌اندازی Cloudflare Workers
-- در `dash.cloudflare.com` یک Worker ایجاد کنید.
-- محتویات `sni-server/worker.js` را در ویرایشگر کپی کنید.
-- متغیر محیطی `AUTH_SECRET` را با رمز عبور خود تنظیم کنید.
-- پس از استقرار، دامنه Worker خود را دریافت خواهید کرد.
+**فایل‌ها:** `proxy/proxy.go`, `proxy/tls_fragment.go`, `proxy/tun_flow.go`
 
-### نصب روی VPS شخصی
-اسکریپت نصب یک‌خطی برای اوبونتو/دبیان:
+هسته‌ی مرکزی پروکسی که ترافیک HTTP/HTTPS را مدیریت می‌کند.
 
-```bash
-curl -fsSL https://raw.githubusercontent.com/IRNova/Nova-Proxy-App/main/sni-server/install.sh | sudo bash
+#### حالت‌های عملیاتی:
+| حالت | توضیحات |
+|------|---------|
+| `mitm` | Man-in-the-Middle: گواهی داینامیک، رمزگشایی و بازرسی ترافیک |
+| `transparent` | عبور شفاف TCP بدون رمزگشایی TLS |
+| `tls-rf` | تکه‌تکه کردن ClientHello TLS برای دور زدن DPI |
+| `quic` | پروکسی QUIC/HTTP3 با پشتیبانی از ECH |
+| `direct` | اتصال مستقیم بدون تغییر |
+| `server` | مسیریابی از طریق Worker/SRV |
+| `gsa` | ارسال ترافیک به GSA Proxy محلی |
+
+#### قابلیت‌های کلیدی:
+- **تولید گواهی dynamic** برای MITM با کش
+- **انتخاب هوشمند SNI** با پالیسی‌های `original`, `fake`, `upstream`, `none`
+- **پشتیبانی از Upstream** با رزولوشن متغیر (`$1`, `$backend_ip`)
+- **Cloudflare IP Pool** با health check، fail/report و latency sorting
+- **uTLS fingerprinting** برای شبیه‌سازی مرورگر (Chrome, Firefox)
+- **ECH (Encrypted Client Hello)** با auto-refresh
+- **Sequential/Parallel dial** با fallback
+- **SOCKS5** با تونل‌زنی از طریق GSA
+
+---
+
+### GSA Core
+
+**فایل‌ها:** `proxy/gsa.go`, `proxy/gsa_relay.go`, `proxy/gsa_lan.go`, `proxy/gsa_constants.go`
+
+هسته‌ی **Domain Fronting** از طریق Google Apps Script. قلب تپنده‌ی پروژه برای عبور از محدودیت‌ها.
+
+#### اجزای داخلی:
+
+```
+GSA Manager (gsa.go)
+├── GSARelay (gsa_relay.go)
+│   ├── HTTP/2 Transport (multiplexed)
+│   ├── HTTP/1.1 Pool (keep-alive connections)
+│   ├── Batch Request Coalescing
+│   ├── Response Cache (LRU, 50MB max)
+│   ├── Request Coalescing (de-dup)
+│   ├── Heartbeat Monitor (30s interval)
+│   └── Auto-Failover Logic
+├── GSA Proxy Server (gsa_relay.go)
+│   ├── HTTP Proxy Handler
+│   ├── CONNECT Tunnel Handler
+│   ├── MITM TLS Termination
+│   ├── CORS Injection
+│   ├── Direct Connect Bypass (Google services)
+│   └── SNI Rewrite (YouTube, DoubleClick, etc.)
+├── GSAMITMManager (gsa_relay.go)
+│   ├── Internal CA or Nova's CA
+│   ├── Per-host Cert Cache
+│   └── Dynamic Certificate Generation
+└── Google IP Scanner (gsa.go)
+    ├── Static Candidate IPs (26 IPs)
+    ├── DNS-Based Discovery (google domains)
+    └── TCP+TLS Latency Probing
+```
+
+#### معماری GSA Relay:
+
+```
+Client (Browser) ──> GSA Proxy Server (:8085)
+                         │
+                         ▼
+                    GSA Relay
+                         │
+                    ┌────┴────┐
+                    │         │
+                    ▼         ▼
+              HTTP/2 (h2)  HTTP/1.1 (Pool)
+                    │         │
+                    └────┬────┘
+                         │
+                         ▼
+              Google IP:443 (e.g. 216.239.38.120)
+                         │
+                         ▼
+              Google Apps Script (Script ID)
+                         │
+                         ▼
+              Target Website (یوتیوب، گوگل، ...)
+```
+
+#### تنظیمات GSA:
+
+| کلید | پیش‌فرض | توضیحات |
+|------|---------|---------|
+| `script_id` | `changeme` | شناسه اسکریپت Google Apps |
+| `auth_key` | `changeme` | کلید احراز هویت رله |
+| `google_ip` | `216.239.38.120` | آی‌پی گوگل برای اتصال |
+| `front_domain` | `www.google.com` | دامنه Fronting (SNI) |
+| `listen_port` | `8085` | پورت پروکسی محلی |
+| `auto_failover_enabled` | `true` | تغییر خودکار آی‌پی در صورت خطا |
+| `rotate_front_domain` | `false` | چرخش خودکار دامنه Fronting |
+| `exclude_google_services` | `false` | عدم هدایت سرویس‌های حساس گوگل |
+
+#### لیست Candidate IPs گوگل (26 آی‌پی):
+`216.239.32.120`, `216.239.34.120`, `216.239.36.120`, `216.239.38.120`, `142.250.80.142`, و ...
+
+#### سرویس‌های مستثنی شده از GSA:
+- `gemini.google.com`, `aistudio.google.com`, `mail.google.com`
+- `drive.google.com`, `docs.google.com`, `accounts.google.com`
+- `meet.google.com`, `photos.google.com`, `play.google.com`
+- و ...
+
+#### قابلیت‌های ویژه:
+- **Auto-Failover**: در صورت 3 بار خطای متوالی، به‌صورت خودکار آی‌پی گوگل را اسکن می‌کند
+- **Front Domain Rotation**: چرخش دوره‌ای دامنه Fronting برای جلوگیری از شناسایی
+- **Batch Processing**: گروه‌بندی درخواست‌ها (حداکثر 50 تا) برای کاهش Latency
+- **Request Coalescing**: پاسخ‌های همزمان به چند درخواست یکسان
+- **Response Cache**: کش هوشمند تا 50 مگابایت با TTL پویا
+- **SNI Rewrite**: بازنویسی SNI برای یوتیوب، دابل‌کلیک، گوگل آنالیتیکس
+- **CORS Injection**: تزریق هدرهای CORS برای پشتیبانی از درخواست‌های مرورگر
+- **GZIP/Brotli/Zstd Decoding**: پشتیبانی از انواع فشرده‌سازی
+- **Heartbeat**: مانیتورینگ سلامت اتصال هر 30 ثانیه
+- **Speed Test**: تست سرعت واقعی از طریق تونل GSA
+- **Split Tunnel**: امکان انتخاب برنامه‌های خاص برای عبور از GSA
+
+---
+
+### Core Runtime
+
+**فایل‌ها:** `core_api.go`, `core_runtime.go`, `core_client.go`, `core_markers.go`
+
+فرآیند پشتیبان که با پرچم `--core` اجرا می‌شود و به‌صورت RPC با فرآیند اصلی ارتباط دارد.
+
+#### سرویس‌های RPC:
+| متد | توضیحات |
+|-----|---------|
+| `Core.Ping` | بررسی سلامت هسته |
+| `Core.GetInfo` | دریافت PID، مسیر اجرایی، وضعیت Elevation |
+| `Core.ReloadConfig` | بارگذاری مجدد تنظیمات |
+| `Core.ReloadCertificate` | بارگذاری مجدد گواهی |
+| `Core.StartProxy` | شروع پروکسی |
+| `Core.StopProxy` | توقف پروکسی |
+| `Core.IsProxyRunning` | وضعیت پروکسی |
+| `Core.GetStats` | آمار ترافیک (down/up) |
+| `Core.StartTUN` | شروع TUN با دسترسی ادمین |
+| `Core.StopTUN` | توقف TUN |
+| `Core.GetTUNStatus` | وضعیت TUN |
+| `Core.SetGSADialAddr` | تنظیم آدرس GSA برای پروکسی |
+| `Core.SetProxyMode` | تغییر حالت پروکسی |
+
+#### ویژگی‌های معماری:
+- **قابلیت Elevation**: در صورت نیاز به TUN، فرآیند با دسترسی ادمین ری‌استارت می‌شود
+- **بازیابی هوشمند**: پس از ری‌استارت، تنظیمات قبلی (Proxy, LogCapture) بازیابی می‌شوند
+- **تشابه فایل اجرایی**: بررسی می‌کند که فایل اجرایی یکسان است
+
+---
+
+### Auto Router
+
+**فایل‌ها:** `proxy/auto_routing.go`, `proxy/gfwlist.go`
+
+مسیریاب خودکار برای دامنه‌هایی که قانون دستی ندارند.
+
+#### حالت‌های مسیریابی:
+| حالت | توضیحات |
+|------|---------|
+| `""` (Off) | بدون مسیریابی خودکار |
+| `default` | ECH + TLS-RF + Direct (بر اساس GFWList) |
+| `server` | مانند default + Fallback به Worker/SRV |
+| `gsa` | همه ترافیک از طریق GSA |
+
+#### منطق تصمیم‌گیری:
+```
+درخواست → در GFWList است؟
+    ├── خیر → Direct
+    └── بله → Cloudflare است؟
+        ├── بله → MITM + ECH + Cloudflare Pool
+        └── خیر → TLS-RF (+ Fallback در حالت server)
+```
+
+#### GFWList:
+- منبع پیش‌فرض: `Loyalsoldier/v2ray-rules-dat`
+- کش محلی در فایل `gfwlist_cache.txt`
+- تطابق دقیق و سافیکس (پیمایش سلسله‌مراتب دامنه)
+
+---
+
+### Rule Manager & Config
+
+**فایل‌ها:** `proxy/proxy.go`, `proxy/config.go`
+
+مدیریت قوانین مسیریابی، سایت‌گروپ‌ها، آپستریم‌ها و پروفایل‌های ECH.
+
+#### ساختار داده‌ها:
+- **SiteGroup**: گروه دامنه با حالت اختصاصی (MITM, Direct, ...)
+- **Upstream**: سرورهای بالادستی
+- **DNSNode**: گره‌های DNS-over-HTTPS
+- **ECHProfile**: پروفایل‌های Encrypted Client Hello
+
+#### تطابق دامنه:
+- **Exact Match**: `google.com` → اولویت 1000+
+- **Suffix Match**: `*.google.com` → اولویت بر اساس طول
+- **Regex Match**: `~pattern` → اولویت 900+
+- **Wildcard Pattern**: `base.*` → تطابق با هر TLD
+- **Wildcard**: `*` → اولویت 1
+
+---
+
+### DNS Resolver
+
+**فایل‌ها:** `proxy/doh.go`
+
+سیستم DNS با Failover بین چندین گره DoH.
+
+#### معماری:
+```
+درخواست DNS → گره اول (با اولویت بالا)
+    ├── موفق → پاسخ
+    └── ناموفق → Race بین سایر گره‌ها
+        ├── موفق → پاسخ (سایر گره‌ها کنسل می‌شوند)
+        └── همه ناموفق → Fallback به System DNS
+```
+
+#### قابلیت‌ها:
+- **Parallel Race**: ارسال همزمان درخواست به چند گره
+- **ECH Refresh خودکار**: در صورت خطای TLS، ECH را از Safe Source به‌روز می‌کند
+- **Safe Resolver**: پرس‌وجو فقط از گره‌های غیر-ECH (برای شکستن circular dependency)
+- **ResolveECHSafe**: دریافت ECH config از طریق گره‌های امن
+
+---
+
+### TUN Mode
+
+**فایل‌ها:** `proxy/tun_flow.go`, `external_mihomo.go`
+
+حالت TUN با استفاده از هسته‌ی **Mihomo (Clash.Meta)** به‌عنوان زیرمجموعه.
+
+#### ویژگی‌ها:
+- **TUN Flow Planner**: تحلیل مسیر ترافیک قبل از ارسال
+- **Mihomo Config Generator**: تولید پویای کانفیگ
+- **PID-based Process Management**: مدیریت فرآیند خارجی
+- **Ready Detection**: تشخیص آمادگی از طریق لاگ‌ها
+- **Automatic Restart**: در صورت تغییر تنظیمات
+
+#### کانفیگ Mihomo:
+- Mixed Port: 7890
+- Stack: gvisor
+- Fake-IP Range: 198.18.0.1/16
+- DNS-over-FakeIP با Enhanced Mode
+
+---
+
+### Certificate Manager
+
+**فایل‌ها:** `cert/` (دایرکتوری جدا)
+
+مدیریت گواهی‌های CA برای MITM.
+
+#### قابلیت‌ها:
+- **تولید Root CA**: با OpenSSL یا Go crypto
+- **نصب خودکار در فروشگاه گواهی ویندوز**
+- **Fallback CA**: برای مهاجرت از نسخه‌های قدیمی
+- **Export/Import گواهی**
+- **Installed Certificates**: لیست گواهی‌های نصب شده
+- **Uninstall**: حذف گواهی از طریق thumbprint
+
+---
+
+### utls (TLS Fingerprinting)
+
+**فایل‌ها:** `utls/` (فورک از refraction-networking/utls)
+
+کتابخانه‌ای برای شبیه‌سازی اثرانگشت TLS مرورگرهای مختلف.
+
+#### پشتیبانی از:
+- **Chrome 120** (پیش‌فرض)
+- **Firefox 120**
+- **Custom ClientHello** با ALPN Rewrite
+- **ECH (Encrypted Client Hello)** با پشتیبانی کامل
+- **QUIC Transport Parameters**
+- **Session Ticket** با کنترل دستی
+- **PRNG** با seed مشخص برای تکرارپذیری
+
+---
+
+### Frontend
+
+**مسیر:** `frontend/`
+
+رابط کاربری دسکتاپ با **Wails v3** و **Vite + TypeScript**.
+
+#### تکنولوژی‌ها:
+- **Vite** برای build
+- **TypeScript** برای type safety
+- **Tailwind CSS** برای استایل
+- **Wails v3 Bindings** برای ارتباط با Go backend
+
+#### صفحات:
+- **Dashboard**: نمایش وضعیت پروکسی، ترافیک، سخت‌افزار
+- **Settings**: تنظیمات پورت، پروکسی سیستمی، SOCKS5
+- **Rules**: مدیریت قوانین مسیریابی
+- **GSA**: مدیریت GSA Domain Fronting
+- **DNS**: مدیریت گره‌های DNS
+- **Cloudflare**: مدیریت IP Pool
+- **Certificates**: مدیریت گواهی‌ها
+- **Logs**: مشاهده لاگ‌های بلادرنگ
+- **TUN**: مدیریت TUN Mode
+
+---
+
+## نقشه راه GSA
+
+### فاز ۱: پایه (پیاده‌سازی شده) ✓
+- [x] رله‌ی HTTP/1.1 با Connection Pool (حداکثر ۵۰ اتصال)
+- [x] رله‌ی HTTP/2 با اتصال Multiplexed
+- [x] Batch Request Coalescing (پنجره ۵ میلی‌ثانیه، حداکثر ۵۰ تا)
+- [x] Request Coalescing (پاسخ واحد به درخواست‌های همزمان یکسان)
+- [x] مکانسیم Heartbeat (هر ۳۰ ثانیه)
+- [x] Google IP Scanner (Candidate IPs + DNS Discovery)
+- [x] MITM TLS Termination با CA اختصاصی
+- [x] SNI Rewrite برای یوتیوب و سرویس‌های گوگل
+- [x] Direct Connect Bypass برای سرویس‌های حساس گوگل
+- [x] CORS Injection
+
+### فاز ۲: بهینه‌سازی (پیاده‌سازی شده) ✓
+- [x] Response Cache (LRU، ۵۰ مگابایت، TTL پویا)
+- [x] Content Decoding (Gzip, Brotli, Zstd, Deflate)
+- [x] Auto-Failover (تغییر خودکار آی‌پی گوگل پس از ۳ خطا)
+- [x] Front Domain Rotation چرخه‌ای
+- [x] Speed Test & Connection Test
+- [x] LAN Sharing (قابلیت اشتراک در شبکه محلی)
+- [x] Split Tunnel (انتخاب برنامه‌های خاص)
+
+### فاز ۳: پیشرفته (در حال توسعه)
+- [ ] **Warp Integration** - مسیریابی ترافیک از طریق Cloudflare Warp
+- [ ] **Multi-Script Load Balancing** - توزیع بار بین چندین Apps Script
+- [ ] **QUIC به جای TCP** - کاهش Latency با QUIC به Google
+- [ ] **Machine Learning IP Selection** - انتخاب هوشمند آی‌پی گوگل با ML
+- [ ] **IPv6 Support** - پشتیبانی کامل از IPv6 برای اتصال به گوگل
+- [ ] **WebSocket over GSA** - پشتیبانی از WebSocket از طریق رله
+
+### فاز ۴: آتی
+- [ ] **Redis-based Distributed Cache** - کش توزیع شده برای چند نمونه
+- [ ] **gRPC Relay** - جایگزینی HTTP/2 با gRPC برای کارایی بیشتر
+- [ ] **Obfs4 Integration** - لایه‌ی obfuscation اضافی
+- [ ] **Multi-User Support** - پشتیبانی از چند کاربر
+- [ ] **GUI Dashboard Real-time** - مانیتورینگ بلادرنگ با نمودار
+
+---
+
+## نقشه راه کلی پروژه
+
+### هسته Proxy
+
+- [x] MITM Proxy با گواهی داینامیک
+- [x] Transparent TCP Tunnel
+- [x] TLS Fragmentation (TLS-RF)
+- [x] QUIC/HTTP3 Transport
+- [x] Cloudflare IP Pool با Health Check
+- [x] SOCKS5 Proxy
+- [x] ECH (Encrypted Client Hello)
+- [x] uTLS Fingerprinting
+- [x] Cert Bypass Map
+- [ ] **HTTP/3 Server-Side** - پشتیبانی از ورودی QUIC
+- [ ] **Multi-Protocol on Single Port** - تشخیص خودکار پروتکل
+- [ ] **Load-balanced Upstream** - توزیع بار بین آپستریم‌ها
+- [ ] **Geo-aware Routing** - مسیریابی مبتنی بر موقعیت مکانی
+
+### هسته Auto Router
+
+- [x] GFWList Integration
+- [x] Cloudflare Detection (DoH-based)
+- [x] Routing Modes (default, server, gsa)
+- [x] Domain Scoring System
+- [ ] **Real-time GFWList Update** - به‌روزرسانی خودکار لیست
+- [ ] **User-defined Custom Rules Format** - فرمت سفارشی برای قوانین
+- [ ] **Historical Routing Analytics** - تحلیل الگوی مسیریابی
+
+### هسته DNS Resolver
+
+- [x] DoH Failover
+- [x] Parallel Race
+- [x] ECH Refresh خودکار
+- [x] Safe Resolver برای circular dependency
+- [ ] **DNS-over-QUIC** - پشتیبانی از DoQ
+- [ ] **DNS-over-TLS** - پشتیبانی از DoT
+- [ ] **DNSSEC Validation** - اعتبارسنجی DNSSEC
+- [ ] **Local DNS Cache** - کش DNS محلی با TTL
+
+### هسته TUN
+
+- [x] External Mihomo (Clash.Meta) Integration
+- [x] TUN Flow Planning
+- [x] Config Template System
+- [ ] **Built-in TUN** - TUN داخلی بدون نیاز به Mihomo
+- [ ] **Cross-platform TUN** - پشتیبانی از لینوکس و مک
+- [ ] **Per-Process Routing** - مسیریابی بر اساس پردازش
+- [ ] **TUN Traffic Visualization** - نمایش گرافیکی ترافیک TUN
+
+### هسته Core Runtime
+
+- [x] Dual-Process Architecture (RPC)
+- [x] Process Elevation (Admin)
+- [x] Config Hot-Reload
+- [x] Certificate Hot-Reload
+- [x] Route Event Streaming
+- [ ] **gRPC instead of net/rpc** - جایگزینی با gRPC برای کارایی
+- [ ] **Health Dashboard** - مانیتورینگ سلامت هسته
+- [ ] **Auto-Recovery** - بازیابی خودکار در صورت Crash
+
+### Frontend
+
+- [x] Wails v3 Desktop UI
+- [x] System Tray Integration
+- [x] Real-time Traffic Display
+- [x] Rule Management
+- [x] DNS Node Management
+- [x] GSA Configuration Panel
+- [x] Log Viewer
+- [x] Certificate Management
+- [ ] **PWA/Mobile Support** - پشتیبانی از موبایل
+- [ ] **Plugin System** - سیستم افزونه
+- [ ] **Advanced Statistics Dashboard** - داشبورد آماری پیشرفته
+- [ ] **Dark/Light Theme** - تم تیره و روشن
+- [ ] **Multi-language UI** - رابط کاربری چندزبانه
+
+---
+
+## نحوه نصب و اجرا
+
+### پیش‌نیازها
+
+- **Go** 1.25 یا بالاتر
+- **Node.js** برای فرانت‌اند
+- **Wails v3** (محلی در مسیر `go\src\wails\v3`)
+- **Windows 10/11** (برای TUN نیاز به Administrator)
+
+### مراحل Build
+
+```powershell
+# نصب وابستگی‌های فرانت‌اند
+cd frontend
+npm install
+
+# Build فرانت‌اند
+npm run build
+
+# Build برنامه
+cd ..
+go build -o NovaProxy.exe
+```
+
+### اجرا
+
+```powershell
+# اجرای عادی
+.\NovaProxy.exe
+
+# اجرا با هسته (Core Mode - خودکار)
+.\NovaProxy.exe --core
+
+# اجرا در Startup
+.\NovaProxy.exe --startup
 ```
 
 ---
 
-### قابلیت‌های حذف‌شده نسبت به نسخه‌های قبل
-- **WARP (Masque Tunnel):** این قابلیت به طور کامل با تونل GSA جایگزین شده است. GSA عملکرد پایدارتر و انعطاف‌پذیری بیشتری نسبت به WARP دارد.
+## ساختار دایرکتوری‌ها
 
+```
+Nova/
+├── main.go                    # نقطه‌ی ورودی
+├── app.go                     # سرویس اصلی برنامه
+├── app_admin_windows.go       # توابع مخصوص ویندوز (Elevation)
+├── app_admin_other.go         # توابع برای سایر OS
+├── core_api.go                # پیاده‌سازی RPC سرویس Core
+├── core_runtime.go            # اجرای زمان اجرای Core
+├── core_client.go             # کلاینت RPC برای ارتباط با Core
+├── core_markers.go            # مارکرهای دیسک (غیرفعال)
+├── external_mihomo.go         # مدیریت Mihomo خارجی
+├── log_writer.go              # رایت‌کننده‌های لاگ
+├── single_instance_recovery_*.go  # بازیابی نمونه تکی
+├── autostart_*.go             # مدیریت اجرا در Startup
+├── go.mod / go.sum            # وابستگی‌های Go
+├── wails.json                 # تنظیمات Wails
+│
+├── proxy/                     # پکیج هسته پروکسی
+│   ├── proxy.go               # سرور پروکسی اصلی
+│   ├── gsa.go                 # مدیریت GSA Domain Fronting
+│   ├── gsa_relay.go           # رله GSA (شامل proxy server, relay, MITM)
+│   ├── gsa_lan.go             # تشخیص آی‌پی‌های LAN
+│   ├── gsa_constants.go       # ثابت‌های GSA (IPs, domains, etc.)
+│   ├── config.go              # ایمپورت/اکسپورت تنظیمات
+│   ├── auto_routing.go        # مسیریاب خودکار
+│   ├── gfwlist.go             # لیست GFW
+│   ├── doh.go                 # DNS-over-HTTPS Failover Resolver
+│   ├── cf_pool.go             # Cloudflare IP Pool
+│   ├── tls_fragment.go        # TLS Fragmentation
+│   ├── tun_flow.go            # برنامه‌ریزی جریان TUN
+│   ├── port_manager.go        # مدیریت پورت
+│   ├── procmon.go             # مانیتورینگ پردازش‌ها
+│   ├── procmon_windows.go     # TCP Table fetcher
+│   ├── procmon_stub.go        # Stub برای لینوکس
+│   ├── cert_verify.go         # اعتبارسنجی گواهی
+│   └── error_page.go          # صفحات خطا
+│
+├── cert/                      # مدیریت گواهی‌های CA
+├── sysproxy/                  # تنظیمات پروکسی سیستمی
+├── sni-server/                # سرور SNI
+├── utls/                      # فورک TLS Fingerprinting
+├── frontend/                  # رابط کاربری (Vite + TS)
+│   ├── src/                   # کد منبع فرانت‌اند
+│   ├── dist/                  # خروجی build
+│   ├── vite.config.ts         # تنظیمات Vite
+│   └── package.json           # وابستگی‌ها
+├── build/                     # فایل‌های Build
+├── scripts/                   # اسکریپت‌های Build
+├── winres/                    # منابع ویندوز
+└── .github/workflows/         # CI/CD
+```
+
+---
+
+## تکنولوژی‌های استفاده شده
+
+| تکنولوژی | کاربرد |
+|-----------|--------|
+| **Go 1.25** | زبان اصلی برنامه |
+| **Wails v3** | فریمورک دسکتاپ UI |
+| **quic-go** | پروتکل QUIC/HTTP3 |
+| **uTLS** | شبیه‌سازی اثرانگشت TLS |
+| **miekg/dns** | پرس‌وجوی DNS |
+| **golang.org/x/net** | HTTP/2, IPv6, etc. |
+| **golang.org/x/sys** | توابع سیستمی ویندوز |
+| **Vite + TypeScript** | فرانت‌اند |
+| **Tailwind CSS** | استایل‌دهی |
+| **Mihomo (Clash.Meta)** | TUN Mode |
+| **Brotli, Zstd** | فشرده‌سازی محتوا |
+
+---
+
+<p align="center">
+  <strong>NovaProxy</strong> — ساخته شده با ❤️ توسط <a href="https://github.com/gamelatest">gamelatest</a>
+</p>
 </div>
