@@ -1,53 +1,16 @@
-<div dir="rtl" align="center">
+<div dir="rtl" style="font-family: 'Vazirmatn', sans-serif;">
 
-<!-- لوگوی متحرک با افکت ضربان قلب -->
+<div align="center">
+
 <p align="center">
-  <svg width="140" height="140" viewBox="0 0 140 140" xmlns="http://www.w3.org/2000/svg">
-    <defs>
-      <style>
-        @keyframes pulse-ring {
-          0% { r: 55; opacity: 0.3; }
-          50% { r: 65; opacity: 0; }
-          100% { r: 55; opacity: 0.3; }
-        }
-        @keyframes heart-beat {
-          0%, 100% { transform: scale(1); }
-          14% { transform: scale(1.15); }
-          28% { transform: scale(1); }
-          42% { transform: scale(1.08); }
-          56% { transform: scale(1); }
-        }
-        @keyframes glow {
-          0%, 100% { filter: drop-shadow(0 0 4px rgba(231,76,60,0.5)); }
-          50% { filter: drop-shadow(0 0 14px rgba(231,76,60,0.9)); }
-        }
-        .pulse-ring { animation: pulse-ring 2s ease-in-out infinite; transform-origin: center; }
-        .heart { animation: heart-beat 1.2s ease-in-out infinite; transform-origin: center; }
-        .glow { animation: glow 2s ease-in-out infinite; }
-      </style>
-      <radialGradient id="bgGrad" cx="50%" cy="50%" r="50%">
-        <stop offset="0%" stop-color="#2c3e50"/>
-        <stop offset="100%" stop-color="#1a252f"/>
-      </radialGradient>
-    </defs>
-    <!-- دایره پس‌زمینه -->
-    <circle cx="70" cy="70" r="68" fill="url(#bgGrad)" stroke="#e74c3c" stroke-width="2"/>
-    <!-- حلقه پالس -->
-    <circle cx="70" cy="70" r="55" fill="none" stroke="#e74c3c" stroke-width="2" class="pulse-ring"/>
-    <!-- حرف N -->
-    <g class="heart glow" fill="#e74c3c">
-      <text x="70" y="82" font-family="Vazirmatn, sans-serif" font-size="42" font-weight="900" text-anchor="middle" fill="#e74c3c">N</text>
-    </g>
-    <!-- قلب کوچک -->
-    <text x="105" y="40" font-size="18" fill="#e74c3c" class="heart">♥</text>
-  </svg>
+  <img src="https://raw.githubusercontent.com/IRNova/Nova-Proxy-App/main/logo.svg" width="140" height="140" alt="NovaProxy Logo">
 </p>
 
-<h1 style="font-family: 'Vazirmatn', sans-serif; color: #2c3e50; margin-top: 10px;">
+<h1 style="color: #2c3e50; margin-top: 10px;">
   نوواپراکسی
 </h1>
 
-<p style="font-family: 'Vazirmatn', sans-serif; font-size: 16px; color: #7f8c8d;">
+<p style="font-size: 16px; color: #7f8c8d;">
   <strong>NovaProxy</strong> — پل هوشمند به اینترنت آزاد
 </p>
 
@@ -58,8 +21,6 @@
 ---
 
 ## معماری کلّی
-
-<div dir="rtl">
 
 در این پروژه دو مسیر اصلی برای دسترسی به اینترنت آزاد وجود دارد:
 
@@ -200,7 +161,7 @@ TUN از طریق Mihomo (Clash.Meta):
 
 ---
 
-<div align="center" style="margin-top: 40px; font-family: 'Vazirmatn', sans-serif;">
+<div align="center" style="margin-top: 40px;">
 
 <hr style="width: 40px; border: 1px solid #e74c3c;">
 
