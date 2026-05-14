@@ -59,7 +59,7 @@ func GetSystemProxyStatus() SystemProxyStatus {
 
 	status := SystemProxyStatus{}
 
-	// بررسی ProxyEnable
+	// 查询 ProxyEnable
 	out, err := outputHiddenCommand("reg", "query", "HKCU\\"+proxySettingsKey, "/v", "ProxyEnable")
 	if err == nil && len(out) > 0 {
 		if strings.Contains(string(out), "0x1") {
@@ -67,13 +67,13 @@ func GetSystemProxyStatus() SystemProxyStatus {
 		}
 	}
 
-	// بررسی ProxyServer
+	// 查询 ProxyServer
 	out, err = outputHiddenCommand("reg", "query", "HKCU\\"+proxySettingsKey, "/v", "ProxyServer")
 	if err == nil && len(out) > 0 {
 		status.Server = parseRegValue(string(out))
 	}
 
-	// بررسی ProxyOverride
+	// 查询 ProxyOverride
 	out, err = outputHiddenCommand("reg", "query", "HKCU\\"+proxySettingsKey, "/v", "ProxyOverride")
 	if err == nil && len(out) > 0 {
 		status.Override = parseRegValue(string(out))
@@ -190,8 +190,8 @@ func RestoreOriginalProxySettings() error {
 	return notifyProxyChange()
 }
 
-// SetSystemProxyManual allows user to manually configure proxy via Windows settings
+// SetSystemProxyManual 允许用户通过 Windows 设置界面手动配置代理
 func SetSystemProxyManual() error {
-	// Open Windows proxy settings interface
+	// 打开 Windows 代理设置界面
 	return startHiddenCommand("cmd", "/c", "start", "ms-settings:network-proxy")
 }

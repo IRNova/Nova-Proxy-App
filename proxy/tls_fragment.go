@@ -125,18 +125,15 @@ func (p *ProxyServer) handleTLSRFFallback(clientConn net.Conn, host string, rule
 	targetAddr := net.JoinHostPort(host, "443")
 
 	p.mu.RLock()
-	warpMgr := p.warpMgr
 	rules := p.rules
 	p.mu.RUnlock()
 
-	var cfConfig CloudflareConfig
 	var serverHost string
 	if rules != nil {
-		cfConfig = rules.GetCloudflareConfig()
 		serverHost = rules.GetServerHost()
 	}
 
-	newConn, err := DialFallback(rule.FallbackMode, targetAddr, warpMgr, cfConfig, serverHost)
+	newConn, err := DialFallback(rule.FallbackMode, targetAddr, serverHost)
 	if err != nil {
 		p.tracef("[TLS-RF] Fallback %s dial failed for %s: %v", rule.FallbackMode, host, err)
 		clientConn.Close()

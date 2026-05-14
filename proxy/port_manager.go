@@ -10,7 +10,7 @@ import (
 	"syscall"
 )
 
-// FindProcessByPort returns the PID of the process listening on the given port (TCP only).
+// FindProcessByPort returns the PID occupying the specified port. Currently only supports TCP.
 func FindProcessByPort(port int) (int, error) {
 	if runtime.GOOS != "windows" {
 		return 0, fmt.Errorf("only supported on windows")
@@ -21,7 +21,7 @@ func FindProcessByPort(port int) (int, error) {
 	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		return 0, nil // not found likely means port not in use
+		return 0, nil // not found usually means port is not occupied
 	}
 
 	lines := strings.Split(string(out), "\n")
@@ -42,7 +42,7 @@ func FindProcessByPort(port int) (int, error) {
 	return 0, nil
 }
 
-// GetProcessNameByPID returns the name of the process with the given PID.
+// GetProcessNameByPID 获取指定 PID 的进程名。
 func GetProcessNameByPID(pid int) (string, error) {
 	if runtime.GOOS != "windows" {
 		return "", fmt.Errorf("only supported on windows")
@@ -55,7 +55,6 @@ func GetProcessNameByPID(pid int) (string, error) {
 		return "", err
 	}
 
-	// Example output:
 	// Image Name                     PID Session Name        Session#    Mem Usage
 	// ========================= ======== ================ =========== ============
 	// novaproxy.exe                13012 Console                    1     12,345 K
@@ -70,7 +69,7 @@ func GetProcessNameByPID(pid int) (string, error) {
 	return "", fmt.Errorf("failed to parse tasklist output")
 }
 
-// KillProcessByPID forcefully terminates the given PID and its child processes.
+// KillProcessByPID forcefully terminates the specified PID and its child processes.
 func KillProcessByPID(pid int) error {
 	if runtime.GOOS != "windows" {
 		return fmt.Errorf("only supported on windows")
@@ -80,25 +79,25 @@ func KillProcessByPID(pid int) error {
 	return cmd.Run()
 }
 
-// EnsurePortAvailable checks port occupation:
-// 1. If occupied by a process in selfNames list, attempt to kill it.
-// 2. If occupied by another process or killing fails, find the next free port.
+// EnsurePortAvailable checks port availability:
+	// 1. If occupied by processes in selfNames list, try Kill.
+	// 2. If occupied by other processes or Kill fails, find next available port.
 func EnsurePortAvailable(startPort int, selfNames []string) (int, error) {
 	currentPort := startPort
-	maxAttempts := 10 // Avoid infinite loop
+	maxAttempts := 10 // avoid infinite loop
 
 	for i := 0; i < maxAttempts; i++ {
 		pid, err := FindProcessByPort(currentPort)
 		if err != nil || pid == 0 {
-			// Port seems free; double-check by binding
+			// Port is idle, double-check actual availability
 			ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", currentPort))
 			if err == nil {
 				ln.Close()
 				return currentPort, nil
 			}
-			// If net.Listen fails, the port is still unusable; move on.
+			// net.Listen failed, still unavailable, skip to next
 		} else {
-			// Port is occupied; check process name
+			// Port occupied, check process name
 			name, _ := GetProcessNameByPID(pid)
 			isSelf := false
 			for _, self := range selfNames {
@@ -109,15 +108,15 @@ func EnsurePortAvailable(startPort int, selfNames []string) (int, error) {
 			}
 
 			if isSelf {
-				// It's our own process; try to kill it
+				// 是己方进程，尝试 Kill
 				if err := KillProcessByPID(pid); err == nil {
-					// Give the system a moment to release resources
+					// 给系统一点时间回收资源
 					return currentPort, nil
 				}
 			}
 		}
 
-		// Conflict and cannot handle; try next port
+		// Conflict and cannot handle, try next port
 		currentPort++
 	}
 
