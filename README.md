@@ -80,22 +80,8 @@ ProxyServer.handleConnect()
 | **ECG (Encrypted ClientHello)** | پشتیبانی از ECH برای مخفی‌سازی SNI |
 | **تأیید گواهی پیشرفته** | حالت‌های `allow_names` (لیست سفید)، Custom CA pinning |
 
-### فایل‌های MITM
 
-```
-cert/
-├── cert.go           # تولید CA، بارگذاری، خروجی PEM، بازتولید
-├── installer.go      # نصب/حذف/بررسی CA در سیستم‌عامل
-└── exec_windows.go   # اجرای فرمان در ویندوز (hidden/elevated)
 
-proxy/
-├── proxy.go          # هندلر MITM، تونل CONNECT، کانفیگ TLS
-├── tls_fragment.go   # fragmentation برای دور زدن DPI
-├── cert_verify.go    # تأیید گواهی پیشرفته
-└── cf_pool.go        # مخزن IP های کلودفلر
-```
-
----
 
 ## GSA Relay Engine
 
