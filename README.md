@@ -1,211 +1,728 @@
-<div dir="rtl" align="right">
-
-## درباره پروژه
-
-**نوا پروکسی** یک ابزار پروکسی محلی قدرتمند است که به‌طور ویژه برای محیط‌های شبکه‌ی پیچیده طراحی شده است. این ابزار با استفاده از جدیدترین فناوری‌ها از جمله **تزریق ECH**، **تکه‌تکه‌سازی TLS-RF**، **تونل GSA (Google Apps Script)** و **رله در حالت سرور (Server Mode)**، تجربه‌ای پایدار و امن را برای کاربران فراهم می‌کند.
-
----
-
-## قابلیت‌های کلیدی
-
-| دسته | قابلیت | وضعیت | توضیحات |
-|------|--------|-------|---------|
-| **حالت‌های پروکسی** | Transparent (شفاف) | ✅ | تغییر رزولوشن DNS یا اتصال مستقیم بدون خاتمه نشست TLS |
-| | MITM (میانی) | ✅ | رمزگشایی درخواست با گواهی ریشه محلی و تغییر SNI یا تزریق ECH |
-| | QUIC (HTTP/3) | ✅ | بازپخش HTTP/3 با استفاده از quic-go برای دور زدن تشخیص SNI |
-| | TLS-RF | ✅ | تکه‌تکه‌سازی TLS برای اختلال در بازسازی بلادرنگ توسط فایروال |
-| | Server | ✅ | رله پروکسی معکوس با قابلیت پنهان‌سازی ترافیک و پالایش امنیتی |
-| | GSA | ✅ | تونل Google Apps Script با Domain Fronting و قابلیت Auto-Failover |
-| | Direct | ✅ | اتصال مستقیم بدون پردازش |
-| **مسیریابی خودکار** | Default Mode | ✅ | تطابق با GFWList، تشخیص خودکار کلودفلر، اعمال استراتژی بهینه |
-| | GSA Fallback | ✅ | مسیریابی دامنه‌های مسدود از طریق تونل GSA |
-| | Server Fallback | ✅ | اولویت‌دهی به ارسال ترافیک از طریق حالت Server |
-| **قابلیت‌های GSA** | Domain Fronting | ✅ | تونل زدن ترافیک از طریق Google Apps Script با دامنه‌های جبهه |
-| | Auto-Failover | ✅ | تغییر خودکار IP گوگل در صورت قطع اتصال |
-| | Rotate Front Domain | ✅ | چرخش خودکار دامنه‌های جبهه در بازه‌های زمانی مشخص |
-| | Google IP Scanner | ✅ | اسکن خودکار IPهای گوگل و انتخاب بهترین IP |
-| | SNI Rewrite | ✅ | بازنویسی SNI برای دامنه‌های یوتیوب و تبلیغات |
-| | Proxy Apps Filter | ✅ | فیلتر برنامه‌ها و مسیریابی انتخابی |
-| | Speed Test | ✅ | تست سرعت تونل GSA |
-| **امنیت و حریم خصوصی** | ECH Injection | ✅ | تزریق Encrypted Client Hello برای مخفی‌سازی SNI |
-| | Fake SNI | ✅ | جایگزینی SNI با دامنه مجاز برای دور زدن لیست سیاه GFW |
-| | Root Certificate | ✅ | نصب گواهی ریشه محلی برای رمزگشایی ترافیک MITM |
-| | Security Washing | ✅ | حذف هدرهای شناسایی و سیاست‌های محدودکننده CSP |
-| **تنظیمات پیشرفته** | Cloudflare IP Pool | ✅ | تست دوره‌ای IPهای لبه کلودفلر و انتخاب بهینه‌ترین IP |
-| | Upstream DoH | ✅ | استعلام IP با استفاده از DoH برای دقت بیشتر |
-| | Custom Rules | ✅ | قوانین سفارشی با الگوریتم اولویت‌بندی هوشمند |
-| | GeoIP & GeoSite | ✅ | تشخیص IPها و دامنه‌های ایرانی برای مسیریابی داخلی |
-| | SOCKS5 | ✅ | پشتیبانی از پروتکل SOCKS5 |
-| | TUN Flow | ✅ | مسیریابی در سطح هسته با پشتیبانی از UDP |
+<div align="center">
+  <img src="https://raw.githubusercontent.com/IRNova/Nova-Proxy-App/main/logo.svg" width="120" height="120" alt="NovaProxy Logo">
+  <h1>NovaProxy</h1>
+  <p><strong>Cloudflare IP Shaper — Domain Fronting Proxy with MITM + GSA Relay Engines</strong></p>
+  <p>عبور از فیلترینگ هوشمند با دامنه‌فرانتینگ مبتنی بر Google Apps Script و Cloudflare Worker</p>
+  <p>
+    <a href="#fa">🇮🇷 فارسی</a> &nbsp;|&nbsp; <a href="#en">🇬🇧 English</a>
+  </p>
+</div>
 
 ---
 
-## شروع سریع
+<a name="fa"></a>
 
-### 1. دانلود و اجرا
-آخرین نسخه را از بخش [Releases](https://github.com/IRNova/Nova-Proxy-App/releases) دانلود کرده و فایل `NovaProxy.exe` را اجرا کنید.
-### 2. نصب گواهی
-در رابط کاربری اصلی، روی «مدیریت گواهی» → «کلیک برای نصب مجدد گواهی» کلیک کنید. برای اطمینان، می‌توانید وجود گواهی را با دستور `certmgr.msc` -> «مراجع صدور گواهی ریشه قابل اعتماد» بررسی کنید.
+## معرفی
 
-### 3. شروع پروکسی
-نرم‌افزار مجموعه غنی از قوانین رسمی را ارائه می‌دهد. همچنین می‌توانید قوانین دلخواه خود را در بخش «تنظیمات قوانین (Rule settings)» ایجاد کنید، سپس روی «شروع پروکسی (Start Proxy)» کلیک کنید.
+NovaProxy یک پروکسی دسکتاپ (Wails v3 / Go) است که ترافیک اینترنت را از طریق زیرساخت Google و Cloudflare عبور می‌دهد. از دید سیستم DPI، همه ترافیک شبیه ارتباط عادی با `www.google.com` است، در حالی که درخواست واقعی به هر سایتی ارسال می‌شود.
 
----
+دو هسته اصلی:
 
-## حالت‌های اصلی پروکسی
-
-### 1. شفاف (مستقیم)
-- **معماری:** کلاینت -> گره بهینه‌سازی -> سایت مقصد
-- **اصل کار:** رزولوشن DNS محلی را تغییر می‌دهد یا مستقیماً به آی‌پی مقصد متصل می‌شود بدون آنکه نشست TLS را خاتمه دهد.
-
-### 2. میانی (MITM)
-- **معماری:** کلاینت -> نوا پروکسی (رمزگشایی با گواهی CA) -> سایت مقصد
-- **اصل کار:** درخواست را با استفاده از گواهی ریشه محلی رمزگشایی کرده، سپس SNI را تغییر می‌دهد یا از تزریق ECH استفاده می‌کند.
-- **پیش‌نیاز:** نصب گواهی ریشه محلی.
-
-### 3. QUIC (HTTP/3)
-- **معماری:** کلاینت -> بازپخش H3 محلی -> سایت مقصد
-- **اصل کار:** اتصال کلاینت به پروکسی به صورت HTTPS استاندارد است، اما اتصال پروکسی به مقصد به HTTP/3 اجباری می‌شود. از قابلیت scrambling کتابخانه quic-go برای دورزدن تشخیص SNI استفاده می‌کند.
-
-### 4. TLS-RF (تکه‌تکه‌سازی TLS)
-- **معماری:** کلاینت -> هاندشیک تکه‌تکه‌شده -> سایت مقصد
-- **اصل کار:** طرح سفارشی مبهم‌سازی ویژگی‌های هاندشیک TLS شامل تکه‌تکه‌سازی چندلایه و تداخل تأخیر زمانی.
-- **نکته:** نرخ موفقیت به روش DPI بستگی دارد و ممکن است با گذشت زمان کاهش یابد.
-
-### 5. سرور (رله پروکسی معکوس)
-- **معماری:** کلاینت -> گره بهینه‌سازی (Cloudflare Workers / VPS) -> سایت مقصد
-- **اصل کار:** از تغییر سفارشی در لایه ۷ با قالب `/{token}/{target_host}/{path}` استفاده می‌کند.
-- **مورد استفاده:** دور زدن مسدودیت مبتنی بر IP.
-
-### 6. GSA (Google Apps Script)
-- **معماری:** کلاینت -> تونل GSA -> Google IP -> سایت مقصد
-- **اصل کار:** با استفاده از Google Apps Script به عنوان رله، ترافیک از طریق زیرساخت گوگل تونل می‌شود (Domain Fronting). دارای Auto-Failover برای تغییر خودکار IP گوگل و Rotate Front Domain برای چرخش دامنه‌های جبهه.
-- **مورد استفاده:** دور زدن فیلترینگ سنگین با بهره‌گیری از زیرساخت گوگل.
-
-### 7. Direct (مستقیم)
-- **اصل کار:** اتصال مستقیم به سایت مقصد بدون هیچ‌گونه پردازش.
+| هسته | وظیفه |
+|------|--------|
+| **MITM Engine** | خاتمه TLS، گواهی‌سازی داینامیک، SNI spoofing، fragmentation |
+| **GSA Relay** | رله ترافیک از Google Apps Script → Cloudflare Worker با H2 multiplexing |
 
 ---
 
-## مسیریابی خودکار (Auto Routing)
 
-ویژگی «مسیریابی خودکار» در نوا پروکسی طوری طراحی شده است که بیشتر وب‌سایت‌ها بدون نیاز به تنظیم دستی قابل اتصال باشند. سه حالت مسیریابی خودکار پشتیبانی می‌شود:
 
-- **حالت پیش‌فرض (Default Mode):** ابتدا با GFWList داخلی تطابق می‌دهد. اگر دامنه در لیست بود و متعلق به کلودفلر باشد، از MITM + ECH استفاده می‌کند؛ در غیر این صورت TLS-RF به کار می‌رود.
-- **حالت برگشت GSA (GSA Fallback Mode):** در صورت عدم موفقیت TLS-RF در سایت‌های مسدود غیرکلودفلری، ترافیک به تونل GSA هدایت می‌شود.
-- **حالت برگشت سرور (Server Fallback Mode):** اولویت ارسال ترافیک سایت‌های مسدود غیرکلودفلری با حالت Server است.
 
----
+## MITM Engine
 
-## راهنمای قوانین سفارشی
+هسته MITM وظیفه **خاتمه TLS و بازرمزگذاری** را بر عهده دارد تا ترافیک HTTPS قابل بازرسی و مسیریابی باشد.
 
-زمانی که قوانین داخلی نیازهای شما را برآورده نمی‌کند، می‌توانید قوانین را به صورت دستی بهینه کنید. برای این کار:
+```
+Client → CONNECT tunnel → TLS Termination (MITM Cert) → Upstream TLS (SNI spoofed) → Target
+                            │
+                     Dynamic Cert Generation
+                     (ECDSA P256 signed by Root CA)
+```
 
-1. **بررسی با ITDog:** قبل از تنظیم قوانین، به [ITDog Website Ping](https://www.itdog.cn/ping/) مراجعه کرده و دامنه مورد نظر را بررسی کنید.
-   - اگر IP رزولوشن شده متعلق به کلودفلر بود: در صفحه ECH نرم‌افزار، با یک کلیک به قانون اضافه کنید.
-   - اگر IP ثابت و غیرکلودفلری بود: IP خارجی را به عنوان «آدرس بالادستی» وارد کرده و از حالت MITM با تغییر SNI استفاده کنید.
-2. **انتخاب حالت پیشرفته:**
-   - اگر دامنه فرانتینگ مسدود شده است: به TLS-RF تغییر وضعیت دهید.
-   - اگر سایت از QUIC پشتیبانی می‌کند: به حالت QUIC مستقیم تغییر دهید.
-3. **تغییرات قوانین پس از کلیک روی «ذخیره تنظیمات» به صورت لحظه‌ای اعمال می‌شوند و نیازی به راه‌اندازی مجدد نرم‌افزار نیست.**
+### معماری MITM
 
----
+```
+ProxyServer.handleConnect()
+    │
+    ├── direct        → TCP tunnel خام
+    ├── transparent   → انتقال بایت‌های TLS بدون خاتمه
+    ├── tls-rf        → تکه‌تکه کردن ClientHello + tunnel
+    ├── quic          → MITM روی QUIC/HTTP3
+    └── mitm          ──► handleMITM()
+                            │
+                    ┌───────▼────────┐
+                    │  establishUpstreamConn()
+                    │  - resolve candidates
+                    │  - uTLS handshake (fingerprint randomization)
+                    │  - ALPN negotiation (h2 / http/1.1)
+                    │  - ECH support
+                    └───────┬────────┘
+                            │
+                    ┌───────▼────────┐
+                    │  makeMITMTLSConfig()
+                    │  - generateCert(host, CA cert, CA key)
+                    │  - ECDSA P256 per-host cert
+                    │  - cache certs in memory
+                    │  - serve to client via tls.Server()
+                    └───────┬────────┘
+                            │
+                    ┌───────▼────────┐
+                    │  directTunnel()
+                    │  - bidirectional copy (pooled buffers)
+                    │  - client ↔ upstream
+                    └────────────────┘
+```
 
-## راهنمای پیکربندی GSA
+### امکانات MITM
 
-### صفحه اختصاصی GSA
-صفحه GSA شامل تنظیمات کامل تونل Google Apps Script است:
-- **اسکنر IP گوگل:** اسکن خودکار IPهای گوگل و نمایش تأخیر هر کدام
-- **تنظیمات سرور:** پورت، هاست، شناسه اسکریپت، کلید احراز هویت
-- **دامنه‌های جبهه:** لیست دامنه‌های Fronting (پیش‌فرض: google.com, youtube.com, drive.google.com و ...)
-- **تنظیمات رله:** تأخیر، تایم‌اوت، حجم مجاز پاسخ
-- **Auto-Failover:** تغییر خودکار IP گوگل در صورت قطع اتصال
-- **Rotate Front Domain:** چرخش خودکار دامنه جبهه
-- **Proxy Apps:** فیلتر برنامه‌های منتخب
-- **SNI Rewrite:** بازنویسی SNI برای یوتیوب و تبلیغات
-- **LAN Sharing:** اشتراک‌گذاری تونل در شبکه محلی
-- **وضعیت اتصال:**实时 نمایش درخواست‌ها، پهنای باند، تأخیر و کش
+| قابلیت | توضیح |
+|---------|---------|
+| **گواهی‌سازی داینامیک** | تولید گواهی ECDSA P256 برای هر دامنه در لحظه، امضا شده توسط Root CA (RSA 2048) |
+| **مدیریت Root CA** | ایجاد، نصب و مدیریت CA روی Windows / macOS / Linux / Firefox |
+| **خاتمه TLS** | قطع اتصال TLS کلاینت، اتصال مجدد به سرور مقصد با SNI جعلی |
+| **SNI Spoofing** | جایگزینی SNI واقعی با دامنهٔ جلویی (مثلاً `www.google.com`) |
+| **uTLS Fingerprint** | تقلید اثر انگشت TLS مرورگر Chrome یا Firefox با `refraction-networking/utls` |
+| **TLS Fragmentation** | تکه‌تکه کردن ClientHello به چند segment با تأخیر قابل تنظیم برای عبور از DPI |
+| **QUIC/HTTP3 MITM** | پشتیبانی از MITM روی QUIC با `quic-go` |
+| **ECG (Encrypted ClientHello)** | پشتیبانی از ECH برای مخفی‌سازی SNI |
+| **تأیید گواهی پیشرفته** | حالت‌های `allow_names` (لیست سفید)، Custom CA pinning |
 
----
+### فایل‌های MITM
 
-## راهنمای پیکربندی رابط کاربری
+```
+cert/
+├── cert.go           # تولید CA، بارگذاری، خروجی PEM، بازتولید
+├── installer.go      # نصب/حذف/بررسی CA در سیستمعامل
+└── exec_windows.go   # اجرای فرمان در ویندوز (hidden/elevated)
 
-**داشبورد اصلی:**
-- **شروع پروکسی:** با کلیک روی این دکمه، موتور رهگیری محلی راه‌اندازی می‌شود.
-- **پروکسی سیستمی:** به طور خودکار پروکسی HTTP/HTTPS سیستم را تنظیم می‌کند.
-- **وضعیت GSA:** نمایش وضعیت تونل GSA (روشن/خاموش) و آمار اتصال
-- **SOCKS5:** نمایش آدرس پروکسی SOCKS5
-
-**مدیریت قوانین:**
-- **سیستم اولویت هوشمند:** ترتیب اولویت به صورت دامنه دقیق > پیشوند رجکس > پسوند است.
-- **تغییر حالت:** برای هر گروه قانون می‌توانید از حالت‌های mitm، tls-rf، quic، server، gsa، transparent و direct انتخاب کنید.
-- **Fake SNI:** جایگزینی SNI با دامنه مجاز برای دور زدن مسدودیت SNI.
-
-**تنظیمات ECH:**
-- **نگاشت ECH:** به طور خودکار رکوردهای echconfig را برای دامنه‌های هدف دریافت و ذخیره می‌کند.
-- **Bootstrap ECH:** با فعال بودن، نرم‌افزار از DoH داخلی برای استعلام رکوردهای ECH دامنه‌های ناشناس استفاده می‌کند.
-
-**مخزن IP کلودفلر:**
-- **شتاب لبه:** با آزمایش دوره‌ای IPهای لبه مختلف کلودفلر، اتصال خود را به هوشمندی بهینه می‌کند.
-- **مدیریت IP:** در صورت افزایش تأخیر، می‌توانید مخزن IP را به صورت دستی به‌روزرسانی یا پاک کنید.
-
----
-
-## رفع اشکال و سوالات متداول
-
-| مشکل | علت | راه‌حل |
-|------|-----|--------|
-| **اتصال ناامن یا خطای گواهی** | فعال بودن MITM/QUIC بدون نصب گواهی ریشه محلی | کلیک روی «مدیریت گواهی» → «نصب مجدد گواهی» و ریستارت مرورگر |
-| **قوانین اعمال نمی‌شوند** | انقضای قوانین داخلی یا عدم فعال بودن پروکسی | بررسی دکمه «شروع پروکسی» و به‌روزرسانی دستی قوانین |
-| **مخزن IP کلودفلر بروز نمی‌شود** | مشکل در اتصال به IPهای لبه کلودفلر | بررسی اتصال شبکه و پاک کردن مخزن IP برای شروع مجدد جستجو |
-| **سازگاری ECH پیشرفته ندارد** | عدم پشتیبانی تمام وب‌سایت‌ها از ECH | تغییر حالت به MITM یا Server |
-| **اتصال GSA برقرار نمی‌شود** | IP گوگل مسدود یا اسکریپت نامعتبر | اسکن مجدد IP گوگل و بررسی اعتبار اسکریپت |
-
----
-
-## محدودیت‌های استفاده در ایران
-
-### سرویس‌ها و پروتکل‌های محدودشده
-| سرویس | وضعیت | توضیح |
-|-------|-------|-------|
-| **Google IPs** | ⚠️ محدود | IPهای گوگل ممکن است در بازه‌های زمانی مختلف توسط GFW مسدود یا محدود شوند |
-| **Google Apps Script** | ⚠️ محدود | دامنه `script.google.com` و `googleapis.com` ممکن است با تأخیر بالا در دسترس باشند |
-| **Cloudflare Workers** | ⚠️ محدود | دامنه `*.workers.dev` در ایران مسدود است |
-| **Cloudflare IP Pool** | ⚠️ محدود | برخی IPهای لبه کلودفلر ممکن است در ایران قابل دسترسی نباشند |
-| **ECH (TLS Encrypted SNI)** | ⚠️ محدود | پشتیبانی از ECH در CDNهای فعال در ایران محدود است |
-| **TLS-RF** | ⚠️ وابسته به DPI | نرخ موفقیت به نوع و نسخه DPI نصب‌شده در شبکه بستگی دارد |
-| **QUIC** | ⚠️ محدود | پروتکل QUIC ممکن است در برخی شبکه‌های ایران مسدود باشد |
-| **DoH (DNS over HTTPS)** | ⚠️ محدود | برخی سرورهای DoH خارجی در ایران قابل دسترسی نیستند |
-
-### راهکارهای پیشنهادی برای ایران
-- **اولویت با GSA:** در شرایط فیلترینگ سنگین، تونل GSA با Domain Fronting بالاترین نرخ موفقیت را دارد
-- **تنظیم Auto-Failover:** فعال کردن Auto-Failover در GSA برای تغییر خودکار IP گوگل
-- **چندین دامنه جبهه:** استفاده از لیست متنوع دامنه‌های جبهه (google.com, youtube.com, drive.google.com)
-- **ترکیب با Server Mode:** در صورت عدم کارایی GSA، از حالت Server با VPS خارجی استفاده کنید
-- **بروزرسانی منظم CF Pool:** مخزن IP کلودفلر را به‌روز نگه دارید
-
----
-
-## حالت سرور (Server Mode)
-
-حالت سرور یک مؤلفه اختیاری برای دور زدن مسدودیت مبتنی بر IP است و از یک رله سبک در لایه ۷ استفاده می‌کند.
-
-### راه‌اندازی Cloudflare Workers
-- در `dash.cloudflare.com` یک Worker ایجاد کنید.
-- محتویات `sni-server/worker.js` را در ویرایشگر کپی کنید.
-- متغیر محیطی `AUTH_SECRET` را با رمز عبور خود تنظیم کنید.
-- پس از استقرار، دامنه Worker خود را دریافت خواهید کرد.
-
-### نصب روی VPS شخصی
-اسکریپت نصب یک‌خطی برای اوبونتو/دبیان:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/IRNova/Nova-Proxy-App/main/sni-server/install.sh | sudo bash
+proxy/
+├── proxy.go          # هندلر MITM، تونل CONNECT، کانفیگ TLS
+├── tls_fragment.go   # fragmentation برای دور زدن DPI
+├── cert_verify.go    # تأیید گواهی پیشرفته
+└── cf_pool.go        # مخزن IP های کلودفلر
 ```
 
 ---
 
-### قابلیت‌های حذف‌شده نسبت به نسخه‌های قبل
-- **WARP (Masque Tunnel):** این قابلیت به طور کامل با تونل GSA جایگزین شده است. GSA عملکرد پایدارتر و انعطاف‌پذیری بیشتری نسبت به WARP دارد.
+## GSA Relay Engine
 
-</div>
+هسته GSA ترافیک را از طریق **زیرساخت Google** با تکنیک Domain Fronting رله می‌کند. از دید فیلترینگ، همه ترافیک به نظر `www.google.com` می‌رسد.
+
+```
+Browser
+    │
+    ▼
+GSA Proxy (127.0.0.1:8085)
+    │  ← TLS Termination (MITM cert)
+    ▼
+H2 Connection → Google IP (SNI: www.google.com)
+    │  ← از دید DPI: ترافیک عادی گوگل
+    ▼
+Google Apps Script (script.google.com)
+    │  ← رله JSON داخل زیرساخت گوگل
+    ▼
+Cloudflare Worker
+    │  ← خروج با IP کلودفلر
+    ▼
+Site Target
+```
+
+### معماری GSA
+
+```
+gsaProxyServer.start()
+    │
+    ├── acceptLoop() → handleHTTP(conn)
+    │       │
+    │       ├── CONNECT → handleCONNECT()
+    │       │       ├── gsaShouldDirectConnect() → relayRawTCP()
+    │       │       └── TLS: mitm.getCert() → TLS Server → relayHTTPOverTLS()
+    │       │
+    │       ├── OPTIONS + access-control-request → CORS Preflight
+    │       │
+    │       └── GET/POST → relayRequest()
+    │               │
+    │               ▼
+    │          gsaRelay
+    │               │
+    │               ├── isStatefulRequest()? → relaySingle() (no cache/batch)
+    │               │
+    │               ├── GET (no range, no stateful) → tryCoalesce()
+    │               │       └── waiters share one response
+    │               │
+    │               ├── بچینگ: batchSubmit() → flushBatch()
+    │               │       └── 5ms window, max 50 items
+    │               │
+    │               ├── کش: cache.get() / cache.put()
+    │               │       └── LRU 50MB, TTL: 1h/30min/max-age
+    │               │
+    │               └── Transport Layer
+    │                       ├── H2 Client (HTTP/2 multiplexed)
+    │                       │   └── TLS → Google IP (SNI pool rotation)
+    │                       │
+    │                       └── H1.1 Pool (fallback)
+    │                           └── Conn pool (max 50, TTL 45s)
+    │
+    │
+    ├── GSAManager (مدیریت چرخه حیات)
+    │       ├── Start/Stop
+    │       ├── Auto-Failover (نظارت بر خطا، اسکن IP جدید)
+    │       ├── SNI Rotation (چرخش خودکار دامنه جلویی)
+    │       ├── Heartbeat (پینگ هر ۳۰ ثانیه)
+    │       ├── Google IP Scanner (۲۶ IP ثابت + DNS)
+    │       ├── Speed Test (دانلود واقعی)
+    │       └── Connection Test (TCP+TLS)
+    │
+    └── Server Side
+            ├── Google Apps Script (Code.gs)
+            │       ├── doPost() → دریافت JSON → UrlFetchApp → Worker
+            │       ├── doGet() → صفحه وضعیت
+            │       └── Batch: doBatch() → UrlFetchApp.fetchAll()
+            │
+            └── Cloudflare Worker (worker.js)
+                    ├── POST → fetch() به مقصد
+                    ├── GET → صفحه وضعیت
+                    └── Upstream Forwarder (اختیاری)
+```
+
+### امکانات GSA
+
+| قابلیت | توضیح |
+|---------|--------|
+| **Domain Fronting** | اتصال به IP های گوگل با SNI=گوگل، Host واقعی = script.google.com |
+| **H2 Multiplexing** | یک اتصال H2 پایدار για همه درخواست‌ها |
+| **Connection Pooling** | مخزن ۵۰ تایی اتصال TLS با TTL ۴۵ ثانیه، fallback به H1.1 |
+| **Request Batching** | تجمیع درخواست‌ها در پنجره ۵ms (حداکثر ۵۰ تا) و ارسال یکجا |
+| **Request Coalescing** | درخواست‌های GET یکسان یک پاسخ مشترک می‌گیرند |
+| **Response Caching** | کش LRU با حداکثر ۵۰ مگابایت، TTL هوشمند (۱ ساعت فایل ایستا، ۳۰ دقیقه CSS/JS) |
+| **SNI Rotation** | چرخش خودکار SNI در دامنه‌های `www.google.com`، `mail.google.com`، `accounts.google.com` |
+| **Auto-Failover** | تشخیص خطاهای متوالی → اسکن خودکار IP جدید → تعویض |
+| **Google IP Scanner** | پروب ۲۶ IP ثابت + IP های DNS با هم‌روندی ۸ تایی |
+| **Smart Routing** | سرویس‌های حساس گوگل (Gmail, Drive, Meet) مستقیم وصل می‌شوند |
+| **SNI Rewrite** | یوتیوب و دابل‌کلیک به طور خودکار SNI بازنویسی می‌شوند |
+| **CORS** | هندلر OPTIONS + تزریق هدرهای CORS |
+| **Content Decoding** | دیکد خودکار gzip, deflate, brotli, zstd |
+| **LAN Sharing** | تشخیص IP های شبکه محلی و اشتراک پروکسی |
+| **Split Tunnel** | مسیریابی بر اساس نام برنامه (allowlist) |
+| **Speed Test** | اندازه‌گیری سرعت واقعی دانلود از طریق تونل |
+
+### فایل‌های GSA
+
+```
+proxy/
+├── gsa.go             # GSAManager: config, start/stop, status, IP scan, speed test
+├── gsa_relay.go       # gsaRelay: H2/H1.1 transport, batching, caching, coalescing
+├── gsa_lan.go         # تشخیص IP های LAN
+├── gsa_constants.go   # IP های گوگل، جدول مسیریابی، لیست SNI rewrite
+└── config.go          # مدل GSAConfig
+
+server/
+├── Code.gs            # Google Apps Script
+└── worker.js          # Cloudflare Worker
+```
+
+---
+
+## راه‌اندازی سرور
+
+### ۱. Cloudflare Worker
+
+۱. وارد [dash.cloudflare.com](https://dash.cloudflare.com) شوید
+۲. منوی چپ → **Compute (Workers)** → **Workers & Pages**
+۳. دکمه **Create** → **Start with Hello World**
+۴. نام worker را بگذارید (مثلاً `my-nova-relay`)
+۵. **Deploy** کنید، سپس **Edit code**
+۶. تمام محتوای `server/worker.js` را کپی و جایگزین کنید
+۷. خط زیر را پیدا کنید:
+```js
+const WORKER_URL = "Your-Cloudflare-worker-address";
+```
+۸. مقدار را با آدرس واقعی worker خود جایگزین کنید:
+```js
+const WORKER_URL = "my-nova-relay.yourname.workers.dev";
+```
+۹. **Deploy** را بزنید و آدرس worker را یادداشت کنید
+
+### ۲. Google Apps Script
+
+۱. وارد [script.google.com](https://script.google.com) شوید
+۲. **New project**
+۳. تمام محتوای `server/Code.gs` را کپی و جایگزین کنید
+۴. دو خط زیر را پیدا کنید:
+```js
+const AUTH_KEY = "Novaproxy";
+const WORKER_URL = "https://my-nova-relay.yourname.workers.dev";
+```
+۵. تغییر دهید:
+   - `AUTH_KEY` ← یک رمز دلخواه قوی (مثلاً `mY$tr0nGK3y2024x`)
+   - `WORKER_URL` ← آدرس worker که در مرحله قبل یادداشت کردید
+۶. **Ctrl+S** ذخیره کنید
+۷. منوی بالا → **Deploy** → **New deployment**
+۸. ⚙️ → **Web app** را انتخاب کنید
+۹. تنظیمات:
+   - **Execute as**: `Me`
+   - **Who has access**: `Anyone`
+۱۰. **Deploy** کنید
+۱۱. در صورت درخواست دسترسی:
+    - **Authorize access**
+    - حساب گوگل خود را انتخاب کنید
+    - **Advanced** → **Go to [project name] (unsafe)** → **Allow**
+۱۲. **Deployment ID** را کپی کنید (شبیه `AKfycbz...`)
+
+### ۳. آموزش استفاده از نرم‌افزار
+
+#### مرحله اول — راه‌اندازی اولیه
+
+.
+فایل `novaproxy.exe` را با دو کلیک باز کنید.
+.
+صفحه خوش‌آمدگویی نمایش داده می‌شود. یک **پاپ‌آپ** برای نصب گواهی (Certificate) مربوط به دو قابلیت نمایش داده می‌شود — آن را نصب کنید.
+.
+بعد از نصب گواهی:
+   - **کشور** را روی **Iran** قرار دهید.
+   - **زبان** و **تم** مورد نظر را انتخاب کنید.
+   - دکمه **Start** را بزنید.
+
+#### بدون GSA — فقط MITM
+
+اگر فقط دکمه Start را بزنید و قابلیت **Google Apps Script** را فعال نکنید:
+- پروکسی و پروکسی سیستم روشن می‌شود.
+- از بخش **قوانین**، قوانین موجود خوانده می‌شود.
+- سایت‌هایی که در لیست MITM هستند (مثل تمام سایت‌های زیرمجموعه گوگل، یوتیوب و...) باز می‌شوند.
+- **نکته:** فیلم‌های یوتیوب به دلیل اینکه سرور ویدیو خارج از دامنه گوگل است، باز نمی‌شوند.
+
+#### فعال‌سازی GSA
+
+برای استفاده از قابلیت **Google Apps Script**:
+
+.
+به صفحه **پروکسی** بروید.
+.
+در بخش مربوط به GSA، اطلاعات پیش‌فرض را ویرایش کرده و مقادیر جدید (Auth Key، Script ID، Worker URL) را وارد کنید.
+.
+دکمه **ذخیره** را بزنید.
+.
+به صفحه **مسیریابی** بروید و مسیریابی را روی **خودکار GSA** تنظیم کنید. سیستم به صورت خودکار بهترین IP را برای شما انتخاب می‌کند.
+.
+به صفحه **تنظیمات GSA** بروید و دکمه **اسکن IP** را بزنید تا بین IP‌های موجود، بهترین‌ها برای کار پیدا شوند.
+
+#### شروع کار با GSA
+
+به صفحه **داشبورد** بروید و مراحل زیر را به ترتیب انجام دهید:
+
+.
+**پروکسی** را روشن کنید.
+.
+**پروکسی سیستم** را روشن کنید.
+.
+**کلید GSA** را روشن کنید.
+
+حالا می‌توانید از مرورگر همه سایت‌ها را باز کنید — حتی **تلگرام وب** به خوبی کار می‌کند.
+
+> **توجه:** در حال حاضر برنامه‌های دسکتاپ مثل تلگرام ویندوز از داخل خود سیستمعامل از طریق GSA قابل استفاده نیستند، اما همه سایت‌ها در مرورگر به خوبی باز می‌شوند.
+
+---
+
+## پیش‌نیازها
+
+- حساب Google (برای Apps Script)
+- حساب Cloudflare (برای Worker)
+
+---
+
+## قدردانی
+
+بخش **GSA** این پروژه بر پایه نسخه اولیه [mhr-cfw-go](https://github.com/denuitt1/mhr-cfw-go) ساخته شده است. از این پروژه به عنوان نقطه شروع برای هسته رله Google Apps Script استفاده شده، اما پس از آن ارتقاهای اساسی پیدا کرده و کلی قابلیت به آن اضافه شده است.
+
+از [denuitt1](https://github.com/denuitt1) بابت ارائه این پروژه تشکر می‌شود.
+
+فرانت‌اند (بخش UI) این پروژه از فرانت‌اند پروژه [SniShaper](https://github.com/SniShaper/SniShaper) گرفته شده است. توجه داشته باشید که **SniShaper** برای دور زدن محدودیت‌های اینترنت چین طراحی شده و معماری، هسته MITM و هسته GSA پروژه Nova هیچ ارتباط کدبیس یا وابستگی با آن پروژه ندارند. NovaProxy به طور خاص برای رفع محدودیت‌های اینترنت ایران توسعه یافته است.
+
+از [SniShaper](https://github.com/SniShaper) بابت ارائه این فرانت‌اند تشکر می‌شود.
+
+### مقایسه SniShaper و NovaProxy
+
+| شاخص | SniShaper | نوا پروکسی (Nova-Proxy-App) |
+|------|-----------|---------------------------|
+| **زبان اصلی** | Go 87%, TypeScript | Go, TypeScript (Wails v3) |
+| **پشتیبانی از TUN Mode** | خیر | بله |
+| **پشتیبانی از Google Apps Script** | خیر | بله (GSA Relay) |
+| **تکنیک اصلی Bypass** | دستکاری ClientHello | MITM + Domain Fronting (GSA) |
+
+### تفاوت‌های کلیدی (منحصربه‌فرد بودن Nova)
+
+Nova تنها یک کپی ساده نیست و قابلیت‌های پیشرفته‌ای دارد که در SniShaper دیده نمی‌شود:
+
+- **موتور GSA (Google Apps Script):** مهم‌ترین تفاوت، وجود این موتور است که ترافیک را از طریق سرورهای گوگل رله می‌کند. SniShaper چنین قابلیتی ندارد.
+- **اپتیمایزیشن اختصاصی:** Nova به طور ویژه برای عبور از فیلترینگ ایران بهینه‌سازی شده و از Pool آیپی‌های کلودفلر و WARP Masque پشتیبانی می‌کند.
+- **حالت TUN:** حالت TUN در Nova به شما اجازه می‌دهد کل ترافیک سیستمعامل را بدون تنظیم دستی مدیریت کنید، در حالی که SniShaper چنین قابلیتی ندارد.
+
+---
+
+## سلب مسئولیت
+
+این نرم‌افزار فقط برای اهداف آموزشی، تحقیقاتی و تست ارائه شده است.
+
+- نرم‌افزار «همانطور که هست» (AS IS) ارائه می‌شود بدون هیچ ضمانتی
+- توسعه‌دهندگان مسئولیتی در قبال خسارات احتمالی ندارند
+- رعایت قوانین محلی، ملی و بین‌المللی بر عهده کاربر است
+- رعایت شرایط استفاده از سرویس‌های Google و Cloudflare بر عهده کاربر است
+
+---
+
+## Stargazers over time
+
+[![Stargazers over time](https://starchart.cc/IRNova/Nova-Proxy-App.svg?variant=adaptive)](https://starchart.cc/IRNova/Nova-Proxy-App)
+
+---
+
+<a name="en"></a>
+
+## Introduction
+
+NovaProxy is a desktop proxy (Wails v3 / Go) that routes internet traffic through Google and Cloudflare infrastructure. From the DPI's perspective, all traffic looks like normal communication with `www.google.com`, while actual requests are sent to any target site.
+
+Two main cores:
+
+| Core | Function |
+|------|----------|
+| **MITM Engine** | TLS termination, dynamic certificate generation, SNI spoofing, fragmentation |
+| **GSA Relay** | Relay traffic through Google Apps Script → Cloudflare Worker with H2 multiplexing |
+
+---
+
+## MITM Engine
+
+The MITM Engine handles **TLS termination and re-encryption**, making HTTPS traffic inspectable and routable.
+
+```
+Client → CONNECT tunnel → TLS Termination (MITM Cert) → Upstream TLS (SNI spoofed) → Target
+                            │
+                     Dynamic Cert Generation
+                     (ECDSA P256 signed by Root CA)
+```
+
+### MITM Architecture
+
+```
+ProxyServer.handleConnect()
+    │
+    ├── direct        → Raw TCP tunnel
+    ├── transparent   → Forward TLS bytes without termination
+    ├── tls-rf        → Fragment ClientHello + tunnel
+    ├── quic          → MITM over QUIC/HTTP3
+    └── mitm          ──► handleMITM()
+                            │
+                    ┌───────▼────────┐
+                    │  establishUpstreamConn()
+                    │  - resolve candidates
+                    │  - uTLS handshake (fingerprint randomization)
+                    │  - ALPN negotiation (h2 / http/1.1)
+                    │  - ECH support
+                    └───────┬────────┘
+                            │
+                    ┌───────▼────────┐
+                    │  makeMITMTLSConfig()
+                    │  - generateCert(host, CA cert, CA key)
+                    │  - ECDSA P256 per-host cert
+                    │  - cache certs in memory
+                    │  - serve to client via tls.Server()
+                    └───────┬────────┘
+                            │
+                    ┌───────▼────────┐
+                    │  directTunnel()
+                    │  - bidirectional copy (pooled buffers)
+                    │  - client ↔ upstream
+                    └────────────────┘
+```
+
+### MITM Capabilities
+
+| Feature | Description |
+|---------|-------------|
+| **Dynamic Certificate Generation** | Generate ECDSA P256 certificate per domain on-the-fly, signed by Root CA (RSA 2048) |
+| **Root CA Management** | Create, install, and manage CA on Windows / macOS / Linux / Firefox |
+| **TLS Termination** | Terminate client TLS, reconnect to target with spoofed SNI |
+| **SNI Spoofing** | Replace real SNI with front domain (e.g. `www.google.com`) |
+| **uTLS Fingerprint** | Mimic Chrome or Firefox TLS fingerprint via `refraction-networking/utls` |
+| **TLS Fragmentation** | Fragment ClientHello into multiple segments with configurable delay to bypass DPI |
+| **QUIC/HTTP3 MITM** | MITM support over QUIC via `quic-go` |
+| **ECH (Encrypted ClientHello)** | ECH support to hide SNI |
+| **Advanced Certificate Verification** | `allow_names` whitelist modes, Custom CA pinning |
+
+### MITM Files
+
+```
+cert/
+├── cert.go           # CA generation, loading, PEM output, regeneration
+├── installer.go      # Install/remove/check CA on OS
+└── exec_windows.go   # Execute commands on Windows (hidden/elevated)
+
+proxy/
+├── proxy.go          # MITM handler, CONNECT tunnel, TLS config
+├── tls_fragment.go   # Fragmentation for DPI bypass
+├── cert_verify.go    # Advanced certificate verification
+└── cf_pool.go        # Cloudflare IP pool
+```
+
+---
+
+## GSA Relay Engine
+
+The GSA Relay routes traffic through **Google infrastructure** using the Domain Fronting technique. From the DPI's perspective, all traffic appears to be destined for `www.google.com`.
+
+```
+Browser
+    │
+    ▼
+GSA Proxy (127.0.0.1:8085)
+    │  ← TLS Termination (MITM cert)
+    ▼
+H2 Connection → Google IP (SNI: www.google.com)
+    │  ← From DPI perspective: normal Google traffic
+    ▼
+Google Apps Script (script.google.com)
+    │  ← JSON relay inside Google infrastructure
+    ▼
+Cloudflare Worker
+    │  ← Exit with Cloudflare IP
+    ▼
+Site Target
+```
+
+### GSA Architecture
+
+```
+gsaProxyServer.start()
+    │
+    ├── acceptLoop() → handleHTTP(conn)
+    │       │
+    │       ├── CONNECT → handleCONNECT()
+    │       │       ├── gsaShouldDirectConnect() → relayRawTCP()
+    │       │       └── TLS: mitm.getCert() → TLS Server → relayHTTPOverTLS()
+    │       │
+    │       ├── OPTIONS + access-control-request → CORS Preflight
+    │       │
+    │       └── GET/POST → relayRequest()
+    │               │
+    │               ▼
+    │          gsaRelay
+    │               │
+    │               ├── isStatefulRequest()? → relaySingle() (no cache/batch)
+    │               │
+    │               ├── GET (no range, no stateful) → tryCoalesce()
+    │               │       └── waiters share one response
+    │               │
+    │               ├── batching: batchSubmit() → flushBatch()
+    │               │       └── 5ms window, max 50 items
+    │               │
+    │               ├── cache: cache.get() / cache.put()
+    │               │       └── LRU 50MB, TTL: 1h/30min/max-age
+    │               │
+    │               └── Transport Layer
+    │                       ├── H2 Client (HTTP/2 multiplexed)
+    │                       │   └── TLS → Google IP (SNI pool rotation)
+    │                       │
+    │                       └── H1.1 Pool (fallback)
+    │                           └── Conn pool (max 50, TTL 45s)
+    │
+    │
+    ├── GSAManager (lifecycle management)
+    │       ├── Start/Stop
+    │       ├── Auto-Failover (error monitoring, new IP scan)
+    │       ├── SNI Rotation (automatic front domain rotation)
+    │       ├── Heartbeat (ping every 30s)
+    │       ├── Google IP Scanner (26 static IPs + DNS)
+    │       ├── Speed Test (real download)
+    │       └── Connection Test (TCP+TLS)
+    │
+    └── Server Side
+            ├── Google Apps Script (Code.gs)
+            │       ├── doPost() → receive JSON → UrlFetchApp → Worker
+            │       ├── doGet() → status page
+            │       └── Batch: doBatch() → UrlFetchApp.fetchAll()
+            │
+            └── Cloudflare Worker (worker.js)
+                    ├── POST → fetch() to target
+                    ├── GET → status page
+                    └── Upstream Forwarder (optional)
+```
+
+### GSA Capabilities
+
+| Feature | Description |
+|---------|-------------|
+| **Domain Fronting** | Connect to Google IPs with SNI=google, actual Host=script.google.com |
+| **H2 Multiplexing** | Single persistent H2 connection for all requests |
+| **Connection Pooling** | 50-connection TLS pool with 45s TTL, H1.1 fallback |
+| **Request Batching** | Aggregate requests in 5ms window (max 50), send as batch |
+| **Request Coalescing** | Identical GET requests share a single response |
+| **Response Caching** | LRU cache up to 50MB, smart TTL (1h static, 30min CSS/JS) |
+| **SNI Rotation** | Automatic SNI rotation across `www.google.com`, `mail.google.com`, `accounts.google.com` |
+| **Auto-Failover** | Detect consecutive errors → automatic new IP scan → switch |
+| **Google IP Scanner** | Probe 26 static IPs + DNS IPs with 8-way concurrency |
+| **Smart Routing** | Sensitive Google services (Gmail, Drive, Meet) connect directly |
+| **SNI Rewrite** | YouTube and DoubleClick SNI auto-rewritten |
+| **CORS** | OPTIONS handler + CORS header injection |
+| **Content Decoding** | Auto-decode gzip, deflate, brotli, zstd |
+| **LAN Sharing** | LAN IP detection and proxy sharing |
+| **Split Tunnel** | Route by application name (allowlist) |
+| **Speed Test** | Real download speed measurement through tunnel |
+
+### GSA Files
+
+```
+proxy/
+├── gsa.go             # GSAManager: config, start/stop, status, IP scan, speed test
+├── gsa_relay.go       # gsaRelay: H2/H1.1 transport, batching, caching, coalescing
+├── gsa_lan.go         # LAN IP detection
+├── gsa_constants.go   # Google IPs, routing table, SNI rewrite list
+└── config.go          # GSAConfig model
+
+server/
+├── Code.gs            # Google Apps Script
+└── worker.js          # Cloudflare Worker
+```
+
+---
+
+## Server Setup
+
+### 1. Cloudflare Worker
+
+1. Go to [dash.cloudflare.com](https://dash.cloudflare.com)
+2. Left menu → **Compute (Workers)** → **Workers & Pages**
+3. Click **Create** → **Start with Hello World**
+4. Name your worker (e.g. `my-nova-relay`)
+5. Click **Deploy**, then **Edit code**
+6. Copy all contents of `server/worker.js` and replace
+7. Find this line:
+```js
+const WORKER_URL = "Your-Cloudflare-worker-address";
+```
+8. Replace with your actual worker address:
+```js
+const WORKER_URL = "my-nova-relay.yourname.workers.dev";
+```
+9. Click **Deploy** and note your worker URL
+
+### 2. Google Apps Script
+
+1. Go to [script.google.com](https://script.google.com)
+2. **New project**
+3. Copy all contents of `server/Code.gs` and replace
+4. Find these two lines:
+```js
+const AUTH_KEY = "Novaproxy";
+const WORKER_URL = "https://my-nova-relay.yourname.workers.dev";
+```
+5. Change:
+   - `AUTH_KEY` ← a strong custom password (e.g. `mY$tr0nGK3y2024x`)
+   - `WORKER_URL` ← your worker URL from the previous step
+6. **Ctrl+S** to save
+7. Top menu → **Deploy** → **New deployment**
+8. ⚙️ → Select **Web app**
+9. Settings:
+   - **Execute as**: `Me`
+   - **Who has access**: `Anyone`
+10. Click **Deploy**
+11. If prompted for access:
+    - **Authorize access**
+    - Select your Google account
+    - **Advanced** → **Go to [project name] (unsafe)** → **Allow**
+12. Copy the **Deployment ID** (looks like `AKfycbz...`)
+
+### 3. Usage Tutorial
+
+#### Step 1 — Initial Setup
+
+1. Double-click `novaproxy.exe` to launch.
+2. The welcome screen appears. A **popup** for certificate installation will show — install it.
+3. After installing the certificate:
+   - Set **Country** to **Iran**.
+   - Choose your preferred **Language** and **Theme**.
+   - Click **Start**.
+
+#### Without GSA — MITM Only
+
+If you just click Start without activating the **Google Apps Script** feature:
+- Proxy and system proxy will be enabled.
+- Rules from the **Rules** section will be loaded.
+- Sites in the MITM whitelist (e.g. all Google subdomains, YouTube, etc.) will open.
+- **Note:** YouTube videos won't play because video servers are outside Google's domains.
+
+#### Activating GSA
+
+To use the **Google Apps Script** feature:
+
+1. Go to the **Proxy** page.
+2. In the GSA section, edit the default values and enter your new data (Auth Key, Script ID, Worker URL).
+3. Click **Save**.
+4. Go to the **Routing** page and set routing to **Auto GSA**.
+   - The system will automatically select the best IP for you.
+5. Go to **GSA Settings** and click **Scan IP** to find the best IPs.
+
+#### Using GSA
+
+Go to the **Dashboard** and follow these steps in order:
+
+1. Enable **Proxy**.
+2. Enable **System Proxy**.
+3. Enable **GSA Toggle**.
+
+Now you can browse any site — even **Telegram Web** works perfectly.
+
+> **Note:** Desktop apps like Telegram for Windows currently cannot use GSA directly from the OS, but all sites work fine in the browser.
+
+---
+
+## Prerequisites
+
+- Google account (for Apps Script)
+- Cloudflare account (for Worker)
+
+---
+
+## Acknowledgments
+
+The **GSA** section of this project is based on the initial version of [mhr-cfw-go](https://github.com/denuitt1/mhr-cfw-go). This project was used as a starting point for the Google Apps Script relay core, but has since been significantly upgraded with many new features.
+
+Thanks to [denuitt1](https://github.com/denuitt1) for providing this project.
+
+The frontend (UI) of this project is taken from the [SniShaper](https://github.com/SniShaper/SniShaper) project. Note that **SniShaper** is designed to bypass China's internet restrictions, and the MITM and GSA cores of Nova have no codebase relationship or dependency on that project. NovaProxy is specifically developed to bypass internet restrictions in Iran.
+
+Thanks to [SniShaper](https://github.com/SniShaper) for providing this frontend.
+
+### SniShaper vs NovaProxy Comparison
+
+| Metric | SniShaper | Nova-Proxy-App |
+|--------|-----------|----------------|
+| **Language** | Go 87%, TypeScript | Go, TypeScript (Wails v3) |
+| **TUN Mode** | No | Yes |
+| **Google Apps Script** | No | Yes (GSA Relay) |
+| **Main Bypass Technique** | ClientHello manipulation | MITM + Domain Fronting (GSA) |
+
+### Key Differences (What Makes Nova Unique)
+
+Nova is not just a simple copy — it has advanced features not found in SniShaper:
+
+- **GSA Engine (Google Apps Script):** The most important difference — relays traffic through Google's servers. SniShaper does not have this capability.
+- **Custom Optimization:** Nova is specifically optimized for bypassing Iran's internet restrictions, with Cloudflare IP Pool and WARP Masque support.
+- **TUN Mode:** Nova's TUN mode allows managing all OS traffic without manual configuration, unlike SniShaper.
+
+---
+
+## Disclaimer
+
+This software is provided for educational, research, and testing purposes only.
+
+- The software is provided "AS IS" without any warranty
+- The developers are not liable for any damages
+- Compliance with local, national, and international laws is the user's responsibility
+- Compliance with Google and Cloudflare terms of service is the user's responsibility
+
+---
+
+## Stargazers over time
+
+[![Stargazers over time](https://starchart.cc/IRNova/Nova-Proxy-App.svg?variant=adaptive)](https://starchart.cc/IRNova/Nova-Proxy-App)
