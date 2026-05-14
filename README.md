@@ -1,7 +1,5 @@
 <div dir="rtl">
 
-# نوواپراکسی (NovaProxy) - Cloudflare IP Shaper
-
 <p align="center">
   <img src="https://github.com/IRNova/Nova-Proxy-App/blob/main/logo.svg" alt="NovaProxy Logo" width="128"/>
 </p>
