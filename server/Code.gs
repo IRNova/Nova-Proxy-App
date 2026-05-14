@@ -1,7 +1,7 @@
 // Google Apps Script Nova 
 
 const AUTH_KEY = "Novaproxy";
-const WORKER_URL = "https://nova3.altramax083.workers.dev";
+const WORKER_URL = "https://your.workers.dev";
 
 const SKIP_HEADERS = {
   host: 1, connection: 1, "content-length": 1,
