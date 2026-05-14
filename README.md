@@ -14,7 +14,6 @@ markdown
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="مجوز MIT">
   <img src="https://img.shields.io/github/stars/IRNova/Nova-Proxy-App?style=social" alt="ستاره‌ها">
 </p>
 
