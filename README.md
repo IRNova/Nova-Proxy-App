@@ -1,4 +1,3 @@
-markdown
 <div dir="rtl" align="right">
 
 <p align="center">
