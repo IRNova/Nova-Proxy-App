@@ -6,19 +6,19 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"golang.org/x/sys/windows/registry"
 )
 
 const (
-	proxySettingsKey = `Software\Microsoft\Windows\CurrentVersion\Internet Settings`
-	internetOptionRefresh         = 37
+	proxySettingsKey         = `Software\Microsoft\Windows\CurrentVersion\Internet Settings`
 	internetOptionSettingsChanged = 39
 )
 
 var (
 	wininetDLL             = syscall.NewLazyDLL("wininet.dll")
 	internetSetOptionProc  = wininetDLL.NewProc("InternetSetOptionW")
-	
-	// Cache for system proxy status
+
 	cachedStatus SystemProxyStatus
 	lastCheck    time.Time
 	cacheMu      sync.Mutex
@@ -28,24 +28,6 @@ type SystemProxyStatus struct {
 	Enabled  bool
 	Server   string
 	Override string
-}
-
-func notifyProxyChange() error {
-	if err := callInternetSetOption(internetOptionSettingsChanged); err != nil {
-		return err
-	}
-	return callInternetSetOption(internetOptionRefresh)
-}
-
-func callInternetSetOption(option uintptr) error {
-	ret, _, callErr := internetSetOptionProc.Call(0, option, 0, 0)
-	if ret != 0 {
-		return nil
-	}
-	if callErr != syscall.Errno(0) {
-		return callErr
-	}
-	return fmt.Errorf("InternetSetOptionW failed for option %d", option)
 }
 
 func GetSystemProxyStatus() SystemProxyStatus {
@@ -58,25 +40,25 @@ func GetSystemProxyStatus() SystemProxyStatus {
 	cacheMu.Unlock()
 
 	status := SystemProxyStatus{}
+	k, err := registry.OpenKey(registry.CURRENT_USER, proxySettingsKey, registry.QUERY_VALUE)
+	if err != nil {
+		return status
+	}
+	defer k.Close()
 
-	// 查询 ProxyEnable
-	out, err := outputHiddenCommand("reg", "query", "HKCU\\"+proxySettingsKey, "/v", "ProxyEnable")
-	if err == nil && len(out) > 0 {
-		if strings.Contains(string(out), "0x1") {
-			status.Enabled = true
-		}
+	enableVal, _, err := k.GetIntegerValue("ProxyEnable")
+	if err == nil && enableVal == 1 {
+		status.Enabled = true
 	}
 
-	// 查询 ProxyServer
-	out, err = outputHiddenCommand("reg", "query", "HKCU\\"+proxySettingsKey, "/v", "ProxyServer")
-	if err == nil && len(out) > 0 {
-		status.Server = parseRegValue(string(out))
+	serverVal, _, err := k.GetStringValue("ProxyServer")
+	if err == nil {
+		status.Server = strings.TrimSpace(serverVal)
 	}
 
-	// 查询 ProxyOverride
-	out, err = outputHiddenCommand("reg", "query", "HKCU\\"+proxySettingsKey, "/v", "ProxyOverride")
-	if err == nil && len(out) > 0 {
-		status.Override = parseRegValue(string(out))
+	overrideVal, _, err := k.GetStringValue("ProxyOverride")
+	if err == nil {
+		status.Override = strings.TrimSpace(overrideVal)
 	}
 
 	cacheMu.Lock()
@@ -87,49 +69,47 @@ func GetSystemProxyStatus() SystemProxyStatus {
 	return status
 }
 
-func parseRegValue(output string) string {
-	lines := strings.Split(output, "\n")
-	for _, line := range lines {
-		fields := strings.Fields(line)
-		if len(fields) >= 3 {
-			return fields[len(fields)-1]
-		}
-	}
-	return ""
-}
-
 func SetSystemProxy(enable bool, server string) error {
-	enableVal := "0"
+	k, err := registry.OpenKey(registry.CURRENT_USER, proxySettingsKey, registry.SET_VALUE)
+	if err != nil {
+		return fmt.Errorf("[sysproxy] failed to open registry key: %w", err)
+	}
+	defer k.Close()
+
+	enableVal := uint64(0)
 	if enable {
-		enableVal = "1"
+		enableVal = 1
 	}
 
-	// Set ProxyEnable using reg command
-	if err := runHiddenCommand("reg", "add", "HKCU\\"+proxySettingsKey, "/v", "ProxyEnable", "/t", "REG_DWORD", "/d", enableVal, "/f"); err != nil {
+	if err := k.SetDWordValue("ProxyEnable", uint32(enableVal)); err != nil {
 		return fmt.Errorf("[sysproxy] failed to set ProxyEnable: %w", err)
 	}
 
-	// Set ProxyServer if enabling
 	if enable {
 		if server == "" {
 			return fmt.Errorf("[sysproxy] server cannot be empty when enabling proxy")
 		}
-		if err := runHiddenCommand("reg", "add", "HKCU\\"+proxySettingsKey, "/v", "ProxyServer", "/t", "REG_SZ", "/d", server, "/f"); err != nil {
+		if err := k.SetStringValue("ProxyServer", server); err != nil {
 			return fmt.Errorf("[sysproxy] failed to set ProxyServer: %w", err)
 		}
-
-		// Set ProxyOverride
-		override := "<local>"
-		if err := runHiddenCommand("reg", "add", "HKCU\\"+proxySettingsKey, "/v", "ProxyOverride", "/t", "REG_SZ", "/d", override, "/f"); err != nil {
+		if err := k.SetStringValue("ProxyOverride", "<local>"); err != nil {
 			return fmt.Errorf("[sysproxy] failed to set ProxyOverride: %w", err)
 		}
+	} else {
+		// Always clear ProxyServer when disabling to prevent stale values
+		_ = k.DeleteValue("ProxyServer")
+		_ = k.DeleteValue("ProxyOverride")
 	}
 
 	cacheMu.Lock()
 	lastCheck = time.Time{}
 	cacheMu.Unlock()
 
-	return notifyProxyChange()
+	// Notify WinINET apps (IE, Edge, etc.) that proxy changed — without refresh
+	// so it doesn't cause network disruption. Browsers will pick up the new settings.
+	internetSetOptionProc.Call(0, internetOptionSettingsChanged, 0, 0)
+
+	return nil
 }
 
 func EnableSystemProxy(port int) error {
@@ -144,54 +124,39 @@ func DisableSystemProxy() error {
 	return SetSystemProxy(false, "")
 }
 
-func GetSystemProxyStatusSafe() (SystemProxyStatus, error) {
-	status := GetSystemProxyStatus()
-	return status, nil
-}
-
-var originalProxySettings *SystemProxyStatus
+var (
+	originalProxySettings   *SystemProxyStatus
+	originalProxySettingsMu sync.Mutex
+)
 
 func SaveOriginalProxySettings() error {
 	status := GetSystemProxyStatus()
+	originalProxySettingsMu.Lock()
 	originalProxySettings = &status
+	originalProxySettingsMu.Unlock()
 	return nil
 }
 
 func SetOriginalProxySettings(status SystemProxyStatus) {
 	copy := status
+	originalProxySettingsMu.Lock()
 	originalProxySettings = &copy
+	originalProxySettingsMu.Unlock()
 }
 
 func RestoreOriginalProxySettings() error {
-	if originalProxySettings == nil {
-		return nil
+	originalProxySettingsMu.Lock()
+	settings := originalProxySettings
+	originalProxySettingsMu.Unlock()
+
+	if settings == nil {
+		// No original settings saved - force disable everything
+		return SetSystemProxy(false, "")
 	}
 
-	enableVal := "0"
-	if originalProxySettings.Enabled {
-		enableVal = "1"
-	}
-
-	// Restore ProxyEnable
-	runHiddenCommand("reg", "add", "HKCU\\"+proxySettingsKey, "/v", "ProxyEnable", "/t", "REG_DWORD", "/d", enableVal, "/f")
-
-	// Restore ProxyServer if it was enabled
-	if originalProxySettings.Enabled && originalProxySettings.Server != "" {
-		runHiddenCommand("reg", "add", "HKCU\\"+proxySettingsKey, "/v", "ProxyServer", "/t", "REG_SZ", "/d", originalProxySettings.Server, "/f")
-		if originalProxySettings.Override != "" {
-			runHiddenCommand("reg", "add", "HKCU\\"+proxySettingsKey, "/v", "ProxyOverride", "/t", "REG_SZ", "/d", originalProxySettings.Override, "/f")
-		}
-	}
-
-	cacheMu.Lock()
-	lastCheck = time.Time{}
-	cacheMu.Unlock()
-
-	return notifyProxyChange()
+	return SetSystemProxy(settings.Enabled, settings.Server)
 }
 
-// SetSystemProxyManual 允许用户通过 Windows 设置界面手动配置代理
 func SetSystemProxyManual() error {
-	// 打开 Windows 代理设置界面
 	return startHiddenCommand("cmd", "/c", "start", "ms-settings:network-proxy")
 }

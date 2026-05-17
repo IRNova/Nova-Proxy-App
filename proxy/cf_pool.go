@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -23,12 +24,13 @@ type IPStats struct {
 }
 
 type CloudflarePool struct {
-	allIPs    map[string]*IPStats // Keep track of stats for all IPs
-	activeIPs []*IPStats          // IPs that are considered healthy, sorted by latency
-	mu        sync.RWMutex
-	stopChan  chan struct{}
-	running   bool
-	wg        sync.WaitGroup // Track goroutine lifecycle
+	allIPs      map[string]*IPStats // Keep track of stats for all IPs
+	activeIPs   []*IPStats          // IPs that are considered healthy, sorted by latency
+	mu          sync.RWMutex
+	stopChan    chan struct{}
+	running     bool
+	wg          sync.WaitGroup // Track goroutine lifecycle
+	checkRunning atomic.Bool  // Prevents concurrent checkAllIPs calls
 }
 
 func NewCloudflarePool(ips []string) *CloudflarePool {
@@ -103,6 +105,7 @@ func (p *CloudflarePool) UpdateIPs(ips []string) {
 
 	// Trigger check when IP list is updated
 	go p.checkAllIPs()
+	return
 }
 
 // GetTopIPs returns up to n best IPs.
@@ -173,6 +176,7 @@ func (p *CloudflarePool) healthCheckLoop() {
 
 func (p *CloudflarePool) TriggerHealthCheck() {
 	go p.checkAllIPs()
+	return
 }
 
 func (p *CloudflarePool) RemoveInvalidIPs() int {
@@ -203,6 +207,7 @@ func (p *CloudflarePool) ReportFailure(ip string) {
 		if stats.Failures >= 2 {
 			go p.checkIncremental()
 		}
+		return
 	}
 	p.mu.Unlock()
 	p.rebuildActiveIPs()
@@ -210,6 +215,11 @@ func (p *CloudflarePool) ReportFailure(ip string) {
 
 // checkIncremental performs health check on problematic IPs only
 func (p *CloudflarePool) checkIncremental() {
+	if !p.checkRunning.CompareAndSwap(false, true) {
+		return
+	}
+	defer p.checkRunning.Store(false)
+
 	p.mu.RLock()
 	ipsToCheck := make([]string, 0)
 	now := time.Now()
@@ -283,6 +293,11 @@ func (p *CloudflarePool) ReportSuccess(ip string) {
 }
 
 func (p *CloudflarePool) checkAllIPs() {
+	if !p.checkRunning.CompareAndSwap(false, true) {
+		return
+	}
+	defer p.checkRunning.Store(false)
+
 	p.mu.RLock()
 	ipsToCheck := make([]string, 0, len(p.allIPs))
 	for ip := range p.allIPs {

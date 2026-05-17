@@ -1,6 +1,6 @@
 package proxy
 
-var gsaCandidateIPs = []string{
+var gasCandidateIPs = []string{
 	"216.239.32.120",
 	"216.239.34.120",
 	"216.239.36.120",
@@ -30,7 +30,7 @@ var gsaCandidateIPs = []string{
 	"142.250.72.110",
 }
 
-var gsaGoogleDirectExactExclude = map[string]struct{}{
+var gasGoogleDirectExactExclude = map[string]struct{}{
 	"gemini.google.com":     {},
 	"aistudio.google.com":   {},
 	"notebooklm.google.com": {},
@@ -55,29 +55,29 @@ var gsaGoogleDirectExactExclude = map[string]struct{}{
 	"lens.google.com":      {},
 }
 
-var gsaGoogleDirectSuffixExclude = []string{
+var gasGoogleDirectSuffixExclude = []string{
 	".meet.google.com",
 }
 
-var gsaGoogleDirectAllowExact = map[string]struct{}{
+var gasGoogleDirectAllowExact = map[string]struct{}{
 	"www.google.com":          {},
 	"google.com":              {},
 	"safebrowsing.google.com": {},
 }
 
-var gsaGoogleOwnedSuffixes = []string{
+var gasGoogleOwnedSuffixes = []string{
 	".google.com", ".google.co",
 	".googleapis.com", ".gstatic.com",
 	".googleusercontent.com",
 }
 
-var gsaGoogleOwnedExact = map[string]struct{}{
+var gasGoogleOwnedExact = map[string]struct{}{
 	"google.com":     {},
 	"gstatic.com":    {},
 	"googleapis.com": {},
 }
 
-var gsaSNIRewriteSuffixes = []string{
+var gasSNIRewriteSuffixes = []string{
 	"youtube.com",
 	"youtu.be",
 	"youtube-nocookie.com",
@@ -95,7 +95,7 @@ var gsaSNIRewriteSuffixes = []string{
 	"script.google.com",
 }
 
-var gsaTraceHostSuffixes = []string{
+var gasTraceHostSuffixes = []string{
 	"chatgpt.com",
 	"openai.com",
 	"gemini.google.com",
@@ -105,7 +105,7 @@ var gsaTraceHostSuffixes = []string{
 	"turnstile",
 }
 
-var gsaLargeFileExts = map[string]struct{}{
+var gasLargeFileExts = map[string]struct{}{
 	".bin": {},
 	".zip": {}, ".tar": {}, ".gz": {}, ".bz2": {}, ".xz": {}, ".7z": {}, ".rar": {},
 	".exe": {}, ".msi": {}, ".dmg": {}, ".deb": {}, ".rpm": {}, ".apk": {},
@@ -115,18 +115,18 @@ var gsaLargeFileExts = map[string]struct{}{
 	".pdf": {}, ".doc": {}, ".docx": {}, ".ppt": {}, ".pptx": {},
 }
 
-var gsaStatefulHeaderNames = []string{
+var gasStatefulHeaderNames = []string{
 	"cookie", "authorization", "proxy-authorization",
 	"origin", "referer", "if-none-match", "if-modified-since",
 	"cache-control", "pragma",
 }
 
-var gsaUncacheableHeaderNames = []string{
+var gasUncacheableHeaderNames = []string{
 	"cookie", "authorization", "proxy-authorization", "range",
 	"if-none-match", "if-modified-since", "cache-control", "pragma",
 }
 
-var gsaFrontSNIPoolDefault = []string{
+var gasFrontSNIPoolDefault = []string{
 	"www.google.com",
 	"mail.google.com",
 	"accounts.google.com",

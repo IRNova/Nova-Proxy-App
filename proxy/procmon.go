@@ -16,10 +16,10 @@ type ProcessInfo struct {
 }
 
 type procConnTrack struct {
-	pid       int32
-	downBytes int64
-	upBytes   int64
-	lastSeen  time.Time
+	pid          int32
+	downBytes    int64
+	upBytes      int64
+	lastSeenNano int64
 }
 
 type ProcessMonitor struct {
@@ -73,7 +73,7 @@ func (pm *ProcessMonitor) TrackConnection(clientAddr string) {
 	pm.mu.Lock()
 	defer pm.mu.Unlock()
 	if _, exists := pm.conns[clientAddr]; !exists {
-		pm.conns[clientAddr] = &procConnTrack{pid: -1, lastSeen: time.Now()}
+		pm.conns[clientAddr] = &procConnTrack{pid: -1, lastSeenNano: time.Now().UnixNano()}
 	}
 }
 
@@ -84,7 +84,7 @@ func (pm *ProcessMonitor) RecordBytes(clientAddr string, down, up int64) {
 	if ok && ct.pid > 0 {
 		atomic.AddInt64(&ct.downBytes, down)
 		atomic.AddInt64(&ct.upBytes, up)
-		ct.lastSeen = time.Now()
+		atomic.StoreInt64(&ct.lastSeenNano, time.Now().UnixNano())
 	}
 }
 
@@ -106,7 +106,7 @@ func (pm *ProcessMonitor) refresh() {
 		}
 		if pid, ok := portMap[portStr]; ok {
 			ct.pid = pid
-			ct.lastSeen = now
+			atomic.StoreInt64(&ct.lastSeenNano, now.UnixNano())
 		}
 	}
 
@@ -127,7 +127,7 @@ func (pm *ProcessMonitor) refresh() {
 		}
 		pi.DownBytes += atomic.LoadInt64(&ct.downBytes)
 		pi.UpBytes += atomic.LoadInt64(&ct.upBytes)
-		if now.Sub(ct.lastSeen) > 6*time.Second {
+		if time.Duration(now.UnixNano()-atomic.LoadInt64(&ct.lastSeenNano)) > 6*time.Second {
 			pi.IsActive = false
 		}
 	}

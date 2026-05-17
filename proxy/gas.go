@@ -17,7 +17,7 @@ import (
 	"time"
 )
 
-type GSAConfig struct {
+type GASConfig struct {
 	ScriptID          string   `json:"script_id"`
 	ScriptIDs         []string `json:"script_ids,omitempty"`
 	AuthKey           string   `json:"auth_key"`
@@ -57,18 +57,22 @@ type GSAConfig struct {
 	RotateFrontDomain bool `json:"rotate_front_domain"`
 	RotateInterval    int  `json:"rotate_interval"`
 
-	// Split Tunnel
+	// 	Split Tunnel
 	ProxyAppsEnabled bool     `json:"proxy_apps_enabled"`
 	ProxyAppList     []string `json:"proxy_app_list,omitempty"`
+
+	// Health status: "green" = stable, "yellow" = unstable, "red" = offline
+	Health        string `json:"health,omitempty"`
+	RelayFailures int    `json:"relay_failures,omitempty"`
 }
 
-type GSAManager struct {
+type GASManager struct {
 	mu         sync.RWMutex
-	config     GSAConfig
+	config     GASConfig
 	configPath string
 
-	relay       *gsaRelay
-	proxyServer *gsaProxyServer
+	relay       *gasRelay
+	proxyServer *gasProxyServer
 	cancel      context.CancelFunc
 	stopCh      chan struct{}
 	statsTicker *time.Ticker
@@ -78,7 +82,7 @@ type GSAManager struct {
 	rotateStop   chan struct{}
 }
 
-func (m *GSAManager) SetCertGenerator(cg CertGenerator) {
+func (m *GASManager) SetCertGenerator(cg CertGenerator) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.certGen = cg
@@ -89,10 +93,10 @@ var googleScanDomains = []string{
 	"docs.google.com", "play.google.com", "googleapis.com",
 }
 
-func NewGSAManager(configDir string) *GSAManager {
-	m := &GSAManager{
-		configPath: filepath.Join(configDir, "gsa", "config.json"),
-		config: GSAConfig{
+func NewGASManager(configDir string) *GASManager {
+	m := &GASManager{
+		configPath: filepath.Join(configDir, "gas", "config.json"),
+		config: GASConfig{
 			ScriptID:          "changeme",
 			ScriptIDs:         []string{},
 			AuthKey:           "changeme",
@@ -116,26 +120,26 @@ func NewGSAManager(configDir string) *GSAManager {
 			ProxyAppList:        []string{},
 		},
 	}
-	log.Printf("[GSA] Manager initialized, config path: %s", m.configPath)
+	log.Printf("[GAS] Manager initialized, config path: %s", m.configPath)
 	return m
 }
 
-func (m *GSAManager) LoadConfig() error {
+func (m *GASManager) LoadConfig() error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	data, err := os.ReadFile(m.configPath)
 	if err != nil {
 		if os.IsNotExist(err) {
-			log.Printf("[GSA] Config file not found, creating default at %s", m.configPath)
+			log.Printf("[GAS] Config file not found, creating default at %s", m.configPath)
 			return m.saveConfigLocked()
 		}
 		return err
 	}
 
-	var cfg GSAConfig
+	var cfg GASConfig
 	if err := json.Unmarshal(data, &cfg); err != nil {
-		log.Printf("[GSA] Failed to parse config: %v", err)
+		log.Printf("[GAS] Failed to parse config: %v", err)
 		return err
 	}
 
@@ -143,12 +147,12 @@ func (m *GSAManager) LoadConfig() error {
 	cfg.Running = running
 
 	m.config = cfg
-	log.Printf("[GSA] Config loaded: google_ip=%s front_domain=%s listen=%s:%d",
+	log.Printf("[GAS] Config loaded: google_ip=%s front_domain=%s listen=%s:%d",
 		m.config.GoogleIP, m.config.FrontDomain, m.config.ListenHost, m.config.ListenPort)
 	return nil
 }
 
-func (m *GSAManager) saveConfigLocked() error {
+func (m *GASManager) saveConfigLocked() error {
 	dir := filepath.Dir(m.configPath)
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return err
@@ -160,42 +164,42 @@ func (m *GSAManager) saveConfigLocked() error {
 	return os.WriteFile(m.configPath, data, 0644)
 }
 
-func (m *GSAManager) SaveConfig() error {
+func (m *GASManager) SaveConfig() error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	log.Printf("[GSA] Saving config")
+	log.Printf("[GAS] Saving config")
 	return m.saveConfigLocked()
 }
 
-func (m *GSAManager) GetConfig() GSAConfig {
+func (m *GASManager) GetConfig() GASConfig {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return m.config
 }
 
-func (m *GSAManager) UpdateConfig(cfg GSAConfig) error {
+func (m *GASManager) UpdateConfig(cfg GASConfig) error {
 	m.mu.Lock()
 	cfg.Running = m.config.Running
 	m.config = cfg
 	err := m.saveConfigLocked()
 	m.mu.Unlock()
-	log.Printf("[GSA] Config updated: google_ip=%s front_domain=%s script_id=%s",
+	log.Printf("[GAS] Config updated: google_ip=%s front_domain=%s script_id=%s",
 		cfg.GoogleIP, cfg.FrontDomain, cfg.ScriptID)
 	return err
 }
 
-func (m *GSAManager) Start() error {
+func (m *GASManager) Start() error {
 	m.mu.Lock()
 
 	if m.config.Running {
 		m.mu.Unlock()
-		log.Printf("[GSA] Start requested but already running")
+		log.Printf("[GAS] Start requested but already running")
 		return nil
 	}
 
 	if m.config.AuthKey == "" || m.config.AuthKey == "changeme" {
 		m.mu.Unlock()
-		log.Printf("[GSA] Start failed: auth_key not set")
+		log.Printf("[GAS] Start failed: auth_key not set")
 		return fmt.Errorf("auth_key is not set")
 	}
 
@@ -204,11 +208,13 @@ func (m *GSAManager) Start() error {
 		scriptID := m.config.ScriptID
 		if scriptID == "" || scriptID == "changeme" {
 			m.mu.Unlock()
-			log.Printf("[GSA] Start failed: script_id not set")
+			log.Printf("[GAS] Start failed: script_id not set")
 			return fmt.Errorf("script_id is not set")
 		}
 		ids = []string{scriptID}
 	}
+
+	m.stopCh = make(chan struct{})
 
 	m.config.Running = true
 	m.config.LastGoogleIP = m.config.GoogleIP
@@ -227,31 +233,30 @@ func (m *GSAManager) Start() error {
 	m.mu.Unlock()
 
 	if err != nil {
-		log.Printf("[GSA] Start save failed: %v", err)
+		log.Printf("[GAS] Start save failed: %v", err)
 		m.mu.Lock()
 		m.config.Running = false
 		m.mu.Unlock()
 		return err
 	}
 
-	log.Printf("[GSA] Starting real proxy: google_ip=%s listen=%s:%d front_domain=%s",
+	log.Printf("[GAS] Starting real proxy: google_ip=%s listen=%s:%d front_domain=%s",
 		cfg.GoogleIP, cfg.ListenHost, cfg.ListenPort, cfg.FrontDomain)
 
-	gsaLogLANAccess(cfg.ListenHost, cfg.ListenPort)
+	gasLogLANAccess(cfg.ListenHost, cfg.ListenPort)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	m.cancel = cancel
-	m.stopCh = make(chan struct{})
 
-	m.relay = newGSARelay(cfg)
-	m.proxyServer = newGSAProxyServer(cfg, m.relay, m.certGen)
+	m.relay = newGASRelay(cfg)
+	m.proxyServer = newGASProxyServer(cfg, m.relay, m.certGen)
 
 	statsCtx, statsCancel := context.WithCancel(ctx)
 	readyCh := make(chan error, 1)
 	go func() {
-		log.Printf("[GSA] Proxy server goroutine started")
+		log.Printf("[GAS] Proxy server goroutine started")
 		if err := m.proxyServer.start(); err != nil {
-			log.Printf("[GSA] Proxy server error: %v", err)
+			log.Printf("[GAS] Proxy server error: %v", err)
 			readyCh <- err
 		}
 		statsCancel()
@@ -265,24 +270,24 @@ func (m *GSAManager) Start() error {
 		m.relay = nil
 		m.proxyServer = nil
 		m.mu.Unlock()
-		return fmt.Errorf("gsa proxy start failed: %w", startErr)
+		return fmt.Errorf("gas proxy start failed: %w", startErr)
 	case <-m.proxyServer.started:
 	case <-time.After(5 * time.Second):
 		m.mu.Lock()
 		m.config.Running = false
 		m.mu.Unlock()
-		return fmt.Errorf("gsa proxy did not become ready within 5 seconds")
+		return fmt.Errorf("gas proxy did not become ready within 5 seconds")
 	}
 
+	statsTicker := time.NewTicker(3 * time.Second)
+	m.statsTicker = statsTicker
 	go func() {
-		ticker := time.NewTicker(3 * time.Second)
-		defer ticker.Stop()
-		m.statsTicker = ticker
+		defer statsTicker.Stop()
 		for {
 			select {
 			case <-statsCtx.Done():
 				return
-			case <-ticker.C:
+			case <-statsTicker.C:
 				m.collectStats()
 			}
 		}
@@ -311,7 +316,7 @@ func (m *GSAManager) Start() error {
 						continue
 					}
 					if m.relay != nil && m.relay.relayFail >= failThreshold {
-						log.Printf("[GSA-FAILOVER] Relay failures (%d) >= threshold (%d), switching IP...",
+						log.Printf("[GAS-FAILOVER] Relay failures (%d) >= threshold (%d), switching IP...",
 							m.relay.relayFail, failThreshold)
 						m.ScanGoogleIPs()
 						if m.relay != nil {
@@ -353,7 +358,7 @@ func (m *GSAManager) Start() error {
 						if next != current {
 							m.config.FrontDomain = next
 							m.saveConfigLocked()
-							log.Printf("[GSA-ROTATE] Front domain rotated: %s -> %s", current, next)
+							log.Printf("[GAS-ROTATE] Front domain rotated: %s -> %s", current, next)
 						}
 					}
 					m.mu.Unlock()
@@ -365,11 +370,12 @@ func (m *GSAManager) Start() error {
 	return nil
 }
 
-func (m *GSAManager) collectStats() {
+func (m *GASManager) collectStats() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	if m.relay == nil || !m.config.Running {
+		m.config.Health = "red"
 		return
 	}
 
@@ -382,21 +388,37 @@ func (m *GSAManager) collectStats() {
 
 	latency := m.relay.lastLatency
 	if latency > 0 {
-		m.config.ConnectionLatency = latency
+		m.config.ConnectionLatency = latency / 1000000 // ns to ms
 	}
 	m.config.LastGoogleIP = m.relay.connectHost
+	m.config.RelayFailures = m.relay.relayFail
+
+	// Compute health: green = stable, yellow = unstable, red = offline
+	if m.relay.lastRelayOK && m.relay.relayFail == 0 {
+		ms := latency / 1000000
+		if ms < 800 {
+			m.config.Health = "green"
+		} else {
+			m.config.Health = "yellow"
+		}
+	} else if m.relay.relayFail < 3 {
+		m.config.Health = "yellow"
+	} else {
+		m.config.Health = "red"
+	}
 }
 
-func (m *GSAManager) Stop() error {
+func (m *GASManager) Stop() error {
 	m.mu.Lock()
 
 	if !m.config.Running {
 		m.mu.Unlock()
-		log.Printf("[GSA] Stop requested but not running")
+		log.Printf("[GAS] Stop requested but not running")
 		return nil
 	}
 
 	m.config.Running = false
+	m.config.Health = "red"
 	err := m.saveConfigLocked()
 
 	relay := m.relay
@@ -445,50 +467,42 @@ func (m *GSAManager) Stop() error {
 	select {
 	case <-m.stopCh:
 	case <-time.After(5 * time.Second):
-		log.Printf("[GSA] Stop wait timeout")
+		log.Printf("[GAS] Stop wait timeout")
 	}
 
-	log.Printf("[GSA] Proxy stopped")
+	log.Printf("[GAS] Proxy stopped")
 	return err
 }
 
-func (m *GSAManager) GetStatus() GSAConfig {
+func (m *GASManager) GetStatus() GASConfig {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return m.config
 }
 
-func (m *GSAManager) IsRunning() bool {
+func (m *GASManager) IsRunning() bool {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return m.config.Running
 }
 
-func (m *GSAManager) UpdateConnectionStats(latencyMs int64, reqCount int64, bwBytes int64, hits int64, misses int64) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.config.ConnectionLatency = latencyMs
-	m.config.RequestCount = reqCount
-	m.config.BandwidthBytes = bwBytes
-	m.config.CacheHits = hits
-	m.config.CacheMisses = misses
-}
 
-func (m *GSAManager) ScanGoogleIPs() []GoogleIPResult {
-	log.Printf("[GSA] Starting hybrid Google IP scan (CandidateIPs + DNS)...")
+
+func (m *GASManager) ScanGoogleIPs() []GoogleIPResult {
+	log.Printf("[GAS] Starting hybrid Google IP scan (CandidateIPs + DNS)...")
 	frontDomain := m.config.FrontDomain
 	if frontDomain == "" {
 		frontDomain = "www.google.com"
 	}
 
-	results := gsaProbeCandidateIPs(frontDomain)
-	results = append(results, gsaProbeDNSIPs(frontDomain, googleScanDomains)...)
+	results := gasProbeCandidateIPs(frontDomain)
+	results = append(results, gasProbeDNSIPs(frontDomain, googleScanDomains)...)
 
 	sortResults(results)
 
 	if len(results) > 0 {
 		best := results[0]
-		log.Printf("[GSA] Scan complete: %d IPs found, best: %s (%dms)",
+		log.Printf("[GAS] Scan complete: %d IPs found, best: %s (%dms)",
 			len(results), best.IP, best.Latency)
 
 		m.mu.Lock()
@@ -497,28 +511,28 @@ func (m *GSAManager) ScanGoogleIPs() []GoogleIPResult {
 		m.saveConfigLocked()
 		m.mu.Unlock()
 	} else {
-		log.Printf("[GSA] Scan complete: no reachable Google IPs found")
+		log.Printf("[GAS] Scan complete: no reachable Google IPs found")
 	}
 
 	return results
 }
 
-func gsaProbeCandidateIPs(frontDomain string) []GoogleIPResult {
-	log.Printf("[GSA] Probing %d CandidateIPs (static Google IP list)...", len(gsaCandidateIPs))
+func gasProbeCandidateIPs(frontDomain string) []GoogleIPResult {
+	log.Printf("[GAS] Probing %d CandidateIPs (static Google IP list)...", len(gasCandidateIPs))
 	type probeResult struct {
 		result  GoogleIPResult
 		latency int64
 		err     bool
 	}
-	ch := make(chan probeResult, len(gsaCandidateIPs))
+	ch := make(chan probeResult, len(gasCandidateIPs))
 	sem := make(chan struct{}, 8)
 
-	for _, ip := range gsaCandidateIPs {
+	for _, ip := range gasCandidateIPs {
 		ip := ip
 		sem <- struct{}{}
 		go func() {
 			defer func() { <-sem }()
-			latency, err := gsaProbeIP(ip, frontDomain)
+			latency, err := gasProbeIP(ip, frontDomain)
 			if err {
 				ch <- probeResult{err: true}
 				return
@@ -535,19 +549,19 @@ func gsaProbeCandidateIPs(frontDomain string) []GoogleIPResult {
 	}
 
 	var results []GoogleIPResult
-	for i := 0; i < len(gsaCandidateIPs); i++ {
+	for i := 0; i < len(gasCandidateIPs); i++ {
 		r := <-ch
 		if !r.err {
 			results = append(results, r.result)
 		}
 	}
 
-	log.Printf("[GSA] CandidateIPs scan: %d/%d reachable", len(results), len(gsaCandidateIPs))
+	log.Printf("[GAS] CandidateIPs scan: %d/%d reachable", len(results), len(gasCandidateIPs))
 	return results
 }
 
-func gsaProbeDNSIPs(frontDomain string, domains []string) []GoogleIPResult {
-	log.Printf("[GSA] Probing DNS-discovered IPs from %d domains...", len(domains))
+func gasProbeDNSIPs(frontDomain string, domains []string) []GoogleIPResult {
+	log.Printf("[GAS] Probing DNS-discovered IPs from %d domains...", len(domains))
 	resolver := &net.Resolver{}
 	seen := map[string]bool{}
 	var results []GoogleIPResult
@@ -567,7 +581,7 @@ func gsaProbeDNSIPs(frontDomain string, domains []string) []GoogleIPResult {
 			}
 			seen[ipStr] = true
 
-			latency, err := gsaProbeIP(ipStr, frontDomain)
+			latency, err := gasProbeIP(ipStr, frontDomain)
 			if err {
 				continue
 			}
@@ -579,11 +593,11 @@ func gsaProbeDNSIPs(frontDomain string, domains []string) []GoogleIPResult {
 		}
 	}
 
-	log.Printf("[GSA] DNS scan: %d reachable IPs found", len(results))
+	log.Printf("[GAS] DNS scan: %d reachable IPs found", len(results))
 	return results
 }
 
-func gsaProbeIP(ipStr, frontDomain string) (int64, bool) {
+func gasProbeIP(ipStr, frontDomain string) (int64, bool) {
 	start := time.Now()
 
 	dialCtx, dialCancel := context.WithTimeout(context.Background(), 4*time.Second)
@@ -630,27 +644,27 @@ func sortResults(results []GoogleIPResult) {
 	}
 }
 
-func (m *GSAManager) TestConnection() (int64, error) {
+func (m *GASManager) TestConnection() (int64, error) {
 	addr := net.JoinHostPort(m.config.ListenHost, fmt.Sprintf("%d", m.config.ListenPort))
 	start := time.Now()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	conn, err := (&net.Dialer{}).DialContext(ctx, "tcp", addr)
 	if err != nil {
-		log.Printf("[GSA] Connection test to %s failed: %v", addr, err)
-		return 0, fmt.Errorf("gsa not reachable at %s: %v", addr, err)
+		log.Printf("[GAS] Connection test to %s failed: %v", addr, err)
+		return 0, fmt.Errorf("gas not reachable at %s: %v", addr, err)
 	}
 	conn.Close()
 	latency := time.Since(start).Milliseconds()
-	log.Printf("[GSA] Connection test to %s succeeded: %dms", addr, latency)
+	log.Printf("[GAS] Connection test to %s succeeded: %dms", addr, latency)
 	return latency, nil
 }
 
 // TestRelay tests the actual Apps Script relay connection with the given config.
 // Unlike TestConnection (which only checks the local proxy port), this performs
 // a real TLS handshake with the Google IP and a test request through Apps Script.
-func (m *GSAManager) TestRelay(cfg GSAConfig) GSATestResult {
-	result := GSATestResult{}
+func (m *GASManager) TestRelay(cfg GASConfig) GASTestResult {
+	result := GASTestResult{}
 
 	googleIP := cfg.GoogleIP
 	if googleIP == "" {
@@ -697,11 +711,11 @@ func (m *GSAManager) TestRelay(cfg GSAConfig) GSATestResult {
 	result.Success = true
 	result.GoogleIP = googleIP
 	result.FrontDomain = frontDomain
-	log.Printf("[GSA] Relay test OK: %s (SNI: %s) tcp=%dms tls=%dms", googleIP, frontDomain, tcpLatency, tlsLatency)
+	log.Printf("[GAS] Relay test OK: %s (SNI: %s) tcp=%dms tls=%dms", googleIP, frontDomain, tcpLatency, tlsLatency)
 	return result
 }
 
-type GSATestResult struct {
+type GASTestResult struct {
 	Success     bool   `json:"success"`
 	Error       string `json:"error,omitempty"`
 	TCPLatency  int64  `json:"tcp_latency_ms"`
@@ -716,7 +730,7 @@ type GoogleIPResult struct {
 	Domain  string `json:"domain"`
 }
 
-// SpeedTestResult holds the result of a speed test through the GSA tunnel.
+// SpeedTestResult holds the result of a speed test through the GAS tunnel.
 type SpeedTestResult struct {
 	Success      bool   `json:"success"`
 	Error        string `json:"error,omitempty"`
@@ -726,8 +740,8 @@ type SpeedTestResult struct {
 	DurationMs   int64  `json:"duration_ms"`
 }
 
-// RunSpeedTest performs a real download speed test through the GSA tunnel.
-func (m *GSAManager) RunSpeedTest() SpeedTestResult {
+// RunSpeedTest performs a real download speed test through the GAS tunnel.
+func (m *GASManager) RunSpeedTest() SpeedTestResult {
 	var result SpeedTestResult
 	m.mu.RLock()
 	listenAddr := net.JoinHostPort(m.config.ListenHost, fmt.Sprintf("%d", m.config.ListenPort))
@@ -736,29 +750,59 @@ func (m *GSAManager) RunSpeedTest() SpeedTestResult {
 	m.mu.RUnlock()
 
 	if !running {
-		result.Error = "GSA proxy is not running"
+		result.Error = "GAS proxy is not running"
 		return result
 	}
 
-	transport := &http.Transport{
+	// Try proxy transport first; fallback to direct if it fails
+	var client *http.Client
+	var err error
+
+	proxyTransport := &http.Transport{
 		Proxy: http.ProxyURL(&url.URL{Scheme: "http", Host: listenAddr}),
 		TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
 	}
-	client := &http.Client{
-		Transport: transport,
+	proxyClient := &http.Client{
+		Transport: proxyTransport,
 		Timeout:   15 * time.Second,
 	}
 
 	// Measure latency first with a small request
 	latencyURL := "http://www.gstatic.com/generate_204"
 	latencyStart := time.Now()
-	latencyResp, err := client.Get(latencyURL)
-	if err != nil {
-		result.Error = fmt.Sprintf("Speed test latency check failed: %v", err)
+	latencyResp, latencyErr := proxyClient.Get(latencyURL)
+
+	var measuredLatency int64
+	if latencyErr == nil {
+		latencyResp.Body.Close()
+		measuredLatency = time.Since(latencyStart).Milliseconds()
+		client = proxyClient
+	}
+
+	// Fallback: if proxy failed, try direct connection
+	if client == nil {
+		log.Printf("[GAS-SPEEDTEST] Proxy latency check failed (%v), falling back to direct transport", latencyErr)
+		directTransport := &http.Transport{
+			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+		}
+		directClient := &http.Client{
+			Transport: directTransport,
+			Timeout:   15 * time.Second,
+		}
+		latencyStart2 := time.Now()
+		latencyResp2, latencyErr2 := directClient.Get(latencyURL)
+		if latencyErr2 == nil {
+			latencyResp2.Body.Close()
+			measuredLatency = time.Since(latencyStart2).Milliseconds()
+			client = directClient
+		}
+	}
+
+	if client == nil {
+		result.Error = "Speed test failed: no transport available (proxy and direct both unreachable)"
 		return result
 	}
-	latencyResp.Body.Close()
-	measuredLatency := time.Since(latencyStart).Milliseconds()
+
 	if measuredLatency > 0 {
 		result.LatencyMs = measuredLatency
 	} else {
@@ -786,11 +830,9 @@ func (m *GSAManager) RunSpeedTest() SpeedTestResult {
 	bytesDown := len(body)
 	secs := duration.Seconds()
 	if secs > 0 {
-		// Convert to Mbps: bytes * 8 / secs / 1000000
 		result.DownloadMBps = float64(bytesDown) * 8.0 / secs / 1000000.0
 	}
 	if result.DownloadMBps < 0.01 {
-		// Fallback: try a larger file if the result is too small
 		fallbackURL := "https://www.google.com/"
 		start2 := time.Now()
 		resp2, err2 := client.Get(fallbackURL)
@@ -823,7 +865,7 @@ func (m *GSAManager) RunSpeedTest() SpeedTestResult {
 
 // IsAppProxied checks if an application should be routed through the proxy
 // based on the split tunnel configuration.
-func (m *GSAManager) IsAppProxied(appName string) bool {
+func (m *GASManager) IsAppProxied(appName string) bool {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	if !m.config.ProxyAppsEnabled || len(m.config.ProxyAppList) == 0 {
@@ -838,14 +880,14 @@ func (m *GSAManager) IsAppProxied(appName string) bool {
 }
 
 // GetProxyApps returns the list of applications allowed through the proxy.
-func (m *GSAManager) GetProxyApps() []string {
+func (m *GASManager) GetProxyApps() []string {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return m.config.ProxyAppList
 }
 
 // SetProxyApps updates the list of applications allowed through the proxy.
-func (m *GSAManager) SetProxyApps(apps []string) {
+func (m *GASManager) SetProxyApps(apps []string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.config.ProxyAppList = apps

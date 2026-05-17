@@ -25,10 +25,6 @@ type BoolReply struct {
 	Value bool
 }
 
-type IntReply struct {
-	Value int
-}
-
 type StringReply struct {
 	Value string
 }
@@ -57,7 +53,7 @@ type LogsArgs struct {
 	Limit int
 }
 
-type SetGSADialAddrArgs struct {
+type SetGASDialAddrArgs struct {
 	Addr string
 }
 
@@ -107,16 +103,15 @@ func (s *coreService) GetStats(_ EmptyArgs, reply *StatsReply) error {
 }
 
 func (s *coreService) StartTUN(_ EmptyArgs, _ *EmptyArgs) error {
-	go func() {
-		defer func() {
-			if r := recover(); r != nil {
-				s.runtime.failTUNStart(fmt.Errorf("core StartTUN panic: %v", r))
-			}
-		}()
-		if err := s.runtime.startTUN(); err != nil {
-			s.runtime.appendLog("[core] StartTUN failed: " + err.Error())
+	defer func() {
+		if r := recover(); r != nil {
+			s.runtime.failTUNStart(fmt.Errorf("core StartTUN panic: %v", r))
 		}
 	}()
+	if err := s.runtime.startTUN(); err != nil {
+		s.runtime.appendLog("[core] StartTUN failed: " + err.Error())
+		return err
+	}
 	return nil
 }
 
@@ -173,8 +168,8 @@ func (s *coreService) GetProxyMode(_ EmptyArgs, reply *StringReply) error {
 	return nil
 }
 
-func (s *coreService) SetGSADialAddr(args SetGSADialAddrArgs, _ *EmptyArgs) error {
-	s.runtime.proxyServer.SetGSADialAddr(args.Addr)
+func (s *coreService) SetGASDialAddr(args SetGASDialAddrArgs, _ *EmptyArgs) error {
+	s.runtime.proxyServer.SetGASDialAddr(args.Addr)
 	return nil
 }
 
