@@ -14,7 +14,7 @@ import (
 	"strings"
 )
 
-const DefaultCertName = "NovaProxy GSA"
+const DefaultCertName = "NovaProxy GAS"
 
 // InstallCATrust installs the CA certificate into the system trust store.
 // Supports Windows, macOS, Linux, and Firefox.
@@ -80,23 +80,32 @@ func IsCATrusted(certPath, certName string) bool {
 // --- Windows ---
 
 func installCAWindows(certPath string) bool {
+	userOk := false
+	machineOk := false
 	if out, err := runCmd([]string{"certutil", "-addstore", "-user", "Root", certPath}, true); err == nil {
 		fmt.Printf("[Cert] Certificate installed in Windows user Trusted Root store.\n")
 		_ = out
-		return true
+		userOk = true
+	} else {
+		ps := "Import-Certificate -FilePath '" + certPath + "' -CertStoreLocation Cert:\\CurrentUser\\Root"
+		if out, err := runCmd([]string{"powershell", "-NoProfile", "-Command", ps}, true); err == nil {
+			fmt.Printf("[Cert] Certificate installed via PowerShell (CurrentUser).\n")
+			_ = out
+			userOk = true
+		}
 	}
 	if out, err := runCmd([]string{"certutil", "-addstore", "Root", certPath}, true); err == nil {
 		fmt.Printf("[Cert] Certificate installed in Windows system Trusted Root store.\n")
 		_ = out
-		return true
+		machineOk = true
 	}
-	ps := "Import-Certificate -FilePath '" + certPath + "' -CertStoreLocation Cert:\\CurrentUser\\Root"
-	if out, err := runCmd([]string{"powershell", "-NoProfile", "-Command", ps}, true); err == nil {
-		fmt.Printf("[Cert] Certificate installed via PowerShell.\n")
-		_ = out
-		return true
+	if userOk {
+		fmt.Printf("[Cert] CurrentUser install succeeded.\n")
 	}
-	return false
+	if machineOk {
+		fmt.Printf("[Cert] LocalMachine install succeeded.\n")
+	}
+	return userOk || machineOk
 }
 
 func uninstallCAWindows(certPath, certName string) bool {
@@ -311,6 +320,7 @@ func firefoxProfiles() []string {
 
 func runCmd(cmd []string, check bool) ([]byte, error) {
 	c := exec.Command(cmd[0], cmd[1:]...)
+	hideWindow(c)
 	var buf bytes.Buffer
 	c.Stdout = &buf
 	c.Stderr = &buf

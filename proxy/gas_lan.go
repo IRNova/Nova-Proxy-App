@@ -8,26 +8,26 @@ import (
 	"strings"
 )
 
-func gsaLogLANAccess(host string, port int) {
-	lanIPs := gsaGetLANIPs()
+func gasLogLANAccess(host string, port int) {
+	lanIPs := gasGetLANIPs()
 	if len(lanIPs) == 0 {
-		log.Printf("[GSA-LAN] No LAN IPs detected — GSA proxy only available on %s:%d", host, port)
+		log.Printf("[GAS-LAN] No LAN IPs detected — GAS proxy only available on %s:%d", host, port)
 		return
 	}
 	addrs := make([]string, 0, len(lanIPs))
 	for _, ip := range lanIPs {
 		addrs = append(addrs, fmt.Sprintf("%s:%d", ip, port))
 	}
-	log.Printf("[GSA-LAN] GSA proxy available on LAN via:")
+	log.Printf("[GAS-LAN] GAS proxy available on LAN via:")
 	for _, addr := range addrs {
-		log.Printf("[GSA-LAN]   http://%s", addr)
+		log.Printf("[GAS-LAN]   http://%s", addr)
 	}
 	if host == "127.0.0.1" || host == "localhost" {
-		log.Printf("[GSA-LAN] WARNING: listen_host is %s — LAN access requires 0.0.0.0 or a specific LAN IP", host)
+		log.Printf("[GAS-LAN] WARNING: listen_host is %s — LAN access requires 0.0.0.0 or a specific LAN IP", host)
 	}
 }
 
-func gsaGetLANIPs() []string {
+func gasGetLANIPs() []string {
 	host, _ := os.Hostname()
 	seen := map[string]bool{}
 	var ips []string

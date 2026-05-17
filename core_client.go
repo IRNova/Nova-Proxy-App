@@ -281,9 +281,9 @@ func (c *coreClient) Ping() bool {
 	return c.call("Core.Ping", EmptyArgs{}, &reply) == nil && reply.Value
 }
 
-func (c *coreClient) SetGSADialAddr(addr string) error {
+func (c *coreClient) SetGASDialAddr(addr string) error {
 	var empty EmptyArgs
-	return c.call("Core.SetGSADialAddr", SetGSADialAddrArgs{Addr: addr}, &empty)
+	return c.call("Core.SetGASDialAddr", SetGASDialAddrArgs{Addr: addr}, &empty)
 }
 
 func sameExecutable(left, right string) bool {

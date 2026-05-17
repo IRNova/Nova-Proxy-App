@@ -72,10 +72,10 @@ type ProxyServer struct {
 	bytesUp       int64
 	certBypassMap sync.Map
 
-	// gsaDialAddr is the address of the local GSA proxy server (e.g. "127.0.0.1:8085").
-	// When set, rules with Mode "gsa" will forward traffic through this proxy.
-	// Set via SetGSADialAddr(); cleared when GSA proxy stops.
-	gsaDialAddr string
+	// gasDialAddr is the address of the local GAS proxy server (e.g. "127.0.0.1:8085").
+	// When set, rules with Mode "gas" will forward traffic through this proxy.
+	// Set via SetGASDialAddr(); cleared when GAS proxy stops.
+	gasDialAddr string
 
 	// SOCKS5 proxy settings
 	socksAddr     string
@@ -144,7 +144,14 @@ func (r *RuleManager) SetOnConfigSaved(cb func()) {
 func (r *RuleManager) triggerConfigSaved() {
 	cb := r.onConfigSaved
 	if cb != nil {
-		go cb()
+		go func() {
+			defer func() {
+				if r := recover(); r != nil {
+					log.Printf("[RuleManager] panic in config saved callback: %v", r)
+				}
+			}()
+			cb()
+		}()
 	}
 }
 
@@ -354,6 +361,7 @@ func removeHopByHopHeaders(h http.Header) {
 	for _, name := range hopByHopHeaders {
 		h.Del(name)
 	}
+	h.Del("Connection")
 }
 
 func (l *trackingListener) Accept() (net.Conn, error) {
@@ -1083,11 +1091,11 @@ func (p *ProxyServer) UpdateCloudflareIPPool(ips []string) {
 }
 
 
-func (p *ProxyServer) SetGSADialAddr(addr string) {
+func (p *ProxyServer) SetGASDialAddr(addr string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	p.gsaDialAddr = addr
-	log.Printf("[Proxy] GSA dial address set to: %s", addr)
+	p.gasDialAddr = addr
+	log.Printf("[Proxy] GAS dial address set to: %s", addr)
 }
 
 func (p *ProxyServer) SetSOCKSAddr(addr string) error {
@@ -1164,7 +1172,7 @@ func (p *ProxyServer) UpdateECHProfileConfig(profileID string, configBytes []byt
 
 func (p *ProxyServer) SetMode(mode string) error {
 	mode = strings.ToLower(strings.TrimSpace(mode))
-	if mode != "mitm" && mode != "transparent" && mode != "tls-rf" && mode != "quic" && mode != "gsa" {
+	if mode != "mitm" && mode != "transparent" && mode != "tls-rf" && mode != "quic" && mode != "gas" {
 		return fmt.Errorf("invalid proxy mode: %s", mode)
 	}
 	p.mu.Lock()
@@ -1312,10 +1320,6 @@ func (p *ProxyServer) handleRequest(w http.ResponseWriter, req *http.Request) {
 	matchHost := normalizeHost(host)
 	mode := p.GetMode()
 	rule := p.rules.matchRule(matchHost, mode)
-	if rule.SiteID != "" {
-		p.rules.incrementRuleHit(rule.SiteID)
-	}
-
 	p.tracef("[Proxy] Request: %s -> %s (match: %s, runtime-mode: %s, rule-mode: %s)", req.Method, host, matchHost, mode, rule.Mode)
 
 	switch req.Method {
@@ -1335,9 +1339,9 @@ func (p *ProxyServer) handleConnect(w http.ResponseWriter, req *http.Request, ru
 	targetHost := normalizeHost(targetAuthority)
 	targetAddr := ensureAddrWithPort(targetAuthority, "443")
 
-	// GSA active: forward ALL traffic through local GSA proxy, no mode processing
-	if p.gsaDialAddr != "" {
-		p.handleGSAConnect(w, req, targetHost, targetAuthority)
+	// GAS active: forward ALL traffic through local GAS proxy
+	if p.gasDialAddr != "" {
+		p.handleGASConnect(w, req, targetHost, targetAuthority)
 		return
 	}
 
@@ -1656,51 +1660,51 @@ func (p *ProxyServer) directConnect(w http.ResponseWriter, req *http.Request) {
 }
 
 
-// handleGSAConnect handles a CONNECT request by forwarding it through the local GSA proxy server.
-func (p *ProxyServer) handleGSAConnect(w http.ResponseWriter, req *http.Request, targetHost, targetAuthority string) {
-	log.Printf("[GSA] handleGSAConnect called: target=%s gsaDialAddr=%s", targetAuthority, p.gsaDialAddr)
-	if p.gsaDialAddr == "" {
-		log.Printf("[GSA] GSA proxy NOT running (gsaDialAddr is empty) — falling back to direct CONNECT %s", targetAuthority)
-		p.tracef("[GSA] WARNING: Falling back to direct connection because GSA proxy is not running")
+// handleGASConnect handles a CONNECT request by forwarding it through the local GAS proxy server.
+func (p *ProxyServer) handleGASConnect(w http.ResponseWriter, req *http.Request, targetHost, targetAuthority string) {
+	log.Printf("[GAS] handleGASConnect called: target=%s gasDialAddr=%s", targetAuthority, p.gasDialAddr)
+	if p.gasDialAddr == "" {
+		log.Printf("[GAS] GAS proxy NOT running (gasDialAddr is empty) — falling back to direct CONNECT %s", targetAuthority)
+		p.tracef("[GAS] WARNING: Falling back to direct connection because GAS proxy is not running")
 		p.directConnect(w, req)
 		return
 	}
-	log.Printf("[GSA] Forwarding CONNECT %s through GSA proxy at %s", targetAuthority, p.gsaDialAddr)
+	log.Printf("[GAS] Forwarding CONNECT %s through GAS proxy at %s", targetAuthority, p.gasDialAddr)
 
-	log.Printf("[GSA] Step 1: dialing GSA proxy at %s", p.gsaDialAddr)
-	gsaConn, err := net.DialTimeout("tcp", p.gsaDialAddr, 10*time.Second)
+	log.Printf("[GAS] Step 1: dialing GAS proxy at %s", p.gasDialAddr)
+	gasConn, err := net.DialTimeout("tcp", p.gasDialAddr, 10*time.Second)
 	if err != nil {
-		log.Printf("[GSA] WARNING: Failed to connect to GSA proxy at %s: %v — falling back to direct", p.gsaDialAddr, err)
+		log.Printf("[GAS] WARNING: Failed to connect to GAS proxy at %s: %v — falling back to direct", p.gasDialAddr, err)
 		p.directConnect(w, req)
 		return
 	}
-	defer gsaConn.Close()
-	log.Printf("[GSA] Step 2: connected to GSA proxy, sending CONNECT")
+	defer gasConn.Close()
+	log.Printf("[GAS] Step 2: connected to GAS proxy, sending CONNECT")
 
-	// Send CONNECT request through GSA proxy
+	// Send CONNECT request through GAS proxy
 	connectReq := fmt.Sprintf("CONNECT %s HTTP/1.1\r\nHost: %s\r\n\r\n", targetAuthority, targetHost)
-	if _, err := fmt.Fprint(gsaConn, connectReq); err != nil {
-		log.Printf("[GSA] CONNECT write failed: %v", err)
-		http.Error(w, "GSA CONNECT failed", http.StatusBadGateway)
+	if _, err := fmt.Fprint(gasConn, connectReq); err != nil {
+		log.Printf("[GAS] CONNECT write failed: %v", err)
+		http.Error(w, "GAS CONNECT failed", http.StatusBadGateway)
 		return
 	}
-	log.Printf("[GSA] Step 3: CONNECT sent, waiting for response")
+	log.Printf("[GAS] Step 3: CONNECT sent, waiting for response")
 
-	// Read GSA proxy response
-	gsaReader := bufio.NewReader(gsaConn)
-	resp, err := http.ReadResponse(gsaReader, nil)
+	// Read GAS proxy response
+	gasReader := bufio.NewReader(gasConn)
+	resp, err := http.ReadResponse(gasReader, nil)
 	if err != nil || resp.StatusCode != http.StatusOK {
 		status := http.StatusBadGateway
 		if err == nil {
-			log.Printf("[GSA] GSA proxy rejected CONNECT: %d", resp.StatusCode)
+			log.Printf("[GAS] GAS proxy rejected CONNECT: %d", resp.StatusCode)
 		} else {
-			log.Printf("[GSA] GSA proxy response error: %v", err)
+			log.Printf("[GAS] GAS proxy response error: %v", err)
 		}
-		http.Error(w, "GSA proxy rejected CONNECT", status)
+		http.Error(w, "GAS proxy rejected CONNECT", status)
 		return
 	}
 	resp.Body.Close()
-	log.Printf("[GSA] Step 4: received 200 from GSA proxy, hijacking client")
+	log.Printf("[GAS] Step 4: received 200 from GAS proxy, hijacking client")
 
 	// Hijack client connection
 	hijacker, ok := w.(http.Hijacker)
@@ -1710,48 +1714,48 @@ func (p *ProxyServer) handleGSAConnect(w http.ResponseWriter, req *http.Request,
 	}
 	clientConn, rw, err := hijacker.Hijack()
 	if err != nil {
-		log.Printf("[GSA] Hijack failed: %v", err)
+		log.Printf("[GAS] Hijack failed: %v", err)
 		return
 	}
 	defer clientConn.Close()
-	log.Printf("[GSA] Step 5: client hijacked, sending 200 to client")
+	log.Printf("[GAS] Step 5: client hijacked, sending 200 to client")
 
 	// Send 200 to client
 	if _, err := rw.WriteString("HTTP/1.1 200 Connection Established\r\n\r\n"); err != nil {
-		log.Printf("[GSA] 200 write to client failed: %v", err)
+		log.Printf("[GAS] 200 write to client failed: %v", err)
 		return
 	}
 	if err := rw.Flush(); err != nil {
-		log.Printf("[GSA] flush to client failed: %v", err)
+		log.Printf("[GAS] flush to client failed: %v", err)
 		return
 	}
 	clientConn = wrapHijackedConn(clientConn, rw)
-	log.Printf("[GSA] Step 6: starting bidirectional copy between client and GSA proxy")
+	log.Printf("[GAS] Step 6: starting bidirectional copy between client and GAS proxy")
 
 	// Bidirectional copy
 	var wg sync.WaitGroup
 	wg.Add(2)
 	go func() {
-		n, err := io.Copy(clientConn, gsaConn)
-		log.Printf("[GSA] io.Copy gsa->client: %d bytes, err=%v", n, err)
+		n, err := io.Copy(clientConn, gasConn)
+		log.Printf("[GAS] io.Copy gas->client: %d bytes, err=%v", n, err)
 		wg.Done()
 	}()
 	go func() {
-		n, err := io.Copy(gsaConn, clientConn)
-		log.Printf("[GSA] io.Copy client->gsa: %d bytes, err=%v", n, err)
+		n, err := io.Copy(gasConn, clientConn)
+		log.Printf("[GAS] io.Copy client->gas: %d bytes, err=%v", n, err)
 		wg.Done()
 	}()
 	wg.Wait()
-	log.Printf("[GSA] Step 7: bidirectional copy finished")
+	log.Printf("[GAS] Step 7: bidirectional copy finished")
 }
 
-// handleGSAHTTP handles a plain HTTP request by forwarding it through the local GSA proxy server.
-func (p *ProxyServer) handleGSAHTTP(w http.ResponseWriter, req *http.Request) {
-	if p.gsaDialAddr == "" {
-		log.Printf("[GSA] GSA proxy NOT running — falling back to direct HTTP %s %s", req.Method, req.URL)
+// handleGASHTTP handles a plain HTTP request by forwarding it through the local GAS proxy server.
+func (p *ProxyServer) handleGASHTTP(w http.ResponseWriter, req *http.Request) {
+	if p.gasDialAddr == "" {
+		log.Printf("[GAS] GAS proxy NOT running — falling back to direct HTTP %s %s", req.Method, req.URL)
 		resp, err := p.transport.RoundTrip(req)
 		if err != nil {
-			http.Error(w, "GSA fallback failed: "+err.Error(), http.StatusBadGateway)
+			http.Error(w, "GAS fallback failed: "+err.Error(), http.StatusBadGateway)
 			return
 		}
 		defer resp.Body.Close()
@@ -1764,14 +1768,14 @@ func (p *ProxyServer) handleGSAHTTP(w http.ResponseWriter, req *http.Request) {
 		io.Copy(w, resp.Body)
 		return
 	}
-	log.Printf("[GSA] Forwarding HTTP %s %s through GSA proxy at %s", req.Method, req.URL, p.gsaDialAddr)
+	log.Printf("[GAS] Forwarding HTTP %s %s through GAS proxy at %s", req.Method, req.URL, p.gasDialAddr)
 
-	gsaConn, err := net.DialTimeout("tcp", p.gsaDialAddr, 10*time.Second)
+	gasConn, err := net.DialTimeout("tcp", p.gasDialAddr, 10*time.Second)
 	if err != nil {
-		log.Printf("[GSA] Failed to connect to GSA proxy: %v", err)
+		log.Printf("[GAS] Failed to connect to GAS proxy: %v", err)
 		resp, err := p.transport.RoundTrip(req)
 		if err != nil {
-			http.Error(w, "GSA fallback failed: "+err.Error(), http.StatusBadGateway)
+			http.Error(w, "GAS fallback failed: "+err.Error(), http.StatusBadGateway)
 			return
 		}
 		defer resp.Body.Close()
@@ -1784,20 +1788,20 @@ func (p *ProxyServer) handleGSAHTTP(w http.ResponseWriter, req *http.Request) {
 		io.Copy(w, resp.Body)
 		return
 	}
-	defer gsaConn.Close()
+	defer gasConn.Close()
 
 	// Send the request as an HTTP proxy request
-	if err := req.WriteProxy(gsaConn); err != nil {
-		log.Printf("[GSA] Request write failed: %v", err)
-		http.Error(w, "GSA proxy request failed", http.StatusBadGateway)
+	if err := req.WriteProxy(gasConn); err != nil {
+		log.Printf("[GAS] Request write failed: %v", err)
+		http.Error(w, "GAS proxy request failed", http.StatusBadGateway)
 		return
 	}
 
-	// Read response from GSA proxy
-	resp, err := http.ReadResponse(bufio.NewReader(gsaConn), req)
+	// Read response from GAS proxy
+	resp, err := http.ReadResponse(bufio.NewReader(gasConn), req)
 	if err != nil {
-		log.Printf("[GSA] Response read failed: %v", err)
-		http.Error(w, "GSA proxy response failed", http.StatusBadGateway)
+		log.Printf("[GAS] Response read failed: %v", err)
+		http.Error(w, "GAS proxy response failed", http.StatusBadGateway)
 		return
 	}
 	defer resp.Body.Close()
@@ -1830,7 +1834,7 @@ func (p *ProxyServer) socksAcceptLoop(ln net.Listener) {
 }
 
 // handleSOCKS5 handles a single SOCKS5 connection.
-// When GSA mode is active (gsaDialAddr is set), it forwards traffic through the GSA proxy.
+// When GAS mode is active (gasDialAddr is set), it forwards traffic through the GAS proxy.
 // Otherwise, it creates a direct TCP tunnel to the target.
 func (p *ProxyServer) handleSOCKS5(conn net.Conn) {
 	defer conn.Close()
@@ -1911,54 +1915,54 @@ func (p *ProxyServer) handleSOCKS5(conn net.Conn) {
 	p.socksRelay(host, port, conn)
 }
 
-// socksRelay relays a SOCKS5 connection. When GSA is active, it uses a CONNECT
-// tunnel through the GSA proxy so that TLS traffic goes through GSA's MITM/relay
-// and HTTP traffic goes through GSA's HTTP handler. Otherwise creates a direct TCP tunnel.
+// socksRelay relays a SOCKS5 connection. When GAS is active, it uses a CONNECT
+// tunnel through the GAS proxy so that TLS traffic goes through GAS's MITM/relay
+// and HTTP traffic goes through GAS's HTTP handler. Otherwise creates a direct TCP tunnel.
 func (p *ProxyServer) socksRelay(host string, port int, conn net.Conn) {
 	p.mu.RLock()
-	gsaAddr := p.gsaDialAddr
+	gasAddr := p.gasDialAddr
 	p.mu.RUnlock()
 
-	if gsaAddr == "" {
+	if gasAddr == "" {
 		log.Printf("[SOCKS5] direct TCP tunnel to %s:%d", host, port)
 		p.socksDirect(host, port, conn)
 		return
 	}
 
-	log.Printf("[SOCKS5] CONNECT tunnel through GSA proxy at %s for %s:%d", gsaAddr, host, port)
+	log.Printf("[SOCKS5] CONNECT tunnel through GAS proxy at %s for %s:%d", gasAddr, host, port)
 
-	gsaConn, err := net.DialTimeout("tcp", gsaAddr, 10*time.Second)
+	gasConn, err := net.DialTimeout("tcp", gasAddr, 10*time.Second)
 	if err != nil {
-		log.Printf("[SOCKS5] GSA dial failed: %v — direct TCP tunnel to %s:%d", err, host, port)
+		log.Printf("[SOCKS5] GAS dial failed: %v — direct TCP tunnel to %s:%d", err, host, port)
 		p.socksDirect(host, port, conn)
 		return
 	}
-	defer gsaConn.Close()
+	defer gasConn.Close()
 
-	// Use CONNECT tunnel through GSA proxy so TLS goes through MITM/relay,
+	// Use CONNECT tunnel through GAS proxy so TLS goes through MITM/relay,
 	// HTTP goes through relayHTTPOverTLS, and both end up in Apps Script.
 	target := net.JoinHostPort(host, strconv.Itoa(port))
 	connectReq := fmt.Sprintf("CONNECT %s HTTP/1.1\r\nHost: %s\r\n\r\n", target, host)
-	if _, err := fmt.Fprint(gsaConn, connectReq); err != nil {
-		log.Printf("[SOCKS5] CONNECT write to GSA failed: %v — direct fallback", err)
+	if _, err := fmt.Fprint(gasConn, connectReq); err != nil {
+		log.Printf("[SOCKS5] CONNECT write to GAS failed: %v — direct fallback", err)
 		p.socksDirect(host, port, conn)
 		return
 	}
 
-	resp, err := http.ReadResponse(bufio.NewReader(gsaConn), nil)
+	resp, err := http.ReadResponse(bufio.NewReader(gasConn), nil)
 	if err != nil || resp.StatusCode != http.StatusOK {
 		if err != nil {
-			log.Printf("[SOCKS5] GSA CONNECT response error: %v — direct fallback", err)
+			log.Printf("[SOCKS5] GAS CONNECT response error: %v — direct fallback", err)
 		} else {
-			log.Printf("[SOCKS5] GSA CONNECT rejected %s: %d — direct fallback", target, resp.StatusCode)
+			log.Printf("[SOCKS5] GAS CONNECT rejected %s: %d — direct fallback", target, resp.StatusCode)
 		}
 		p.socksDirect(host, port, conn)
 		return
 	}
 	resp.Body.Close()
 
-	log.Printf("[SOCKS5] GSA CONNECT tunnel established for %s", target)
-	p.socksTunnel(conn, gsaConn)
+	log.Printf("[SOCKS5] GAS CONNECT tunnel established for %s", target)
+	p.socksTunnel(conn, gasConn)
 }
 
 // socksTunnel performs bidirectional copy between two connections.
@@ -1996,9 +2000,9 @@ func (p *ProxyServer) handleHTTP(w http.ResponseWriter, req *http.Request, rule 
 	newReq.RequestURI = ""
 	newReq.Header.Del("Proxy-Connection")
 
-	// GSA active: forward ALL HTTP traffic through local GSA proxy
-	if p.gsaDialAddr != "" {
-		p.handleGSAHTTP(w, newReq)
+	// GAS active: forward ALL HTTP traffic through local GAS proxy
+	if p.gasDialAddr != "" {
+		p.handleGASHTTP(w, newReq)
 		return
 	}
 
@@ -2116,8 +2120,8 @@ func (p *ProxyServer) handleMITM(clientConn net.Conn, host string, rule Rule, di
 	p.tracef("[MITM] Handling %s with SNI: %s", host, rule.SniFake)
 
 	if p.certGenerator == nil {
-		p.tracef("[MITM] No cert generator, falling back to direct")
-		p.directTunnel(clientConn, clientConn)
+		p.tracef("[MITM] No cert generator, closing connection")
+		clientConn.Close()
 		return
 	}
 
@@ -2390,19 +2394,6 @@ func (p *ProxyServer) ClearCertCache() {
 	p.certCacheMu.Lock()
 	defer p.certCacheMu.Unlock()
 	p.certCache = make(map[string]*tls.Certificate)
-}
-
-func (p *ProxyServer) trackAccepted(remote string) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	if len(p.recentIngress) >= 10 {
-		p.recentIngress = p.recentIngress[1:]
-	}
-	p.recentIngress = append(p.recentIngress, remote)
-}
-
-func (p *ProxyServer) GetDiagnostics() (int64, int64, int64, []string) {
-	return 0, 0, 0, nil
 }
 
 func NewRuleManager(settingsPath, rulesPath string) *RuleManager {
@@ -2939,14 +2930,6 @@ func (rm *RuleManager) buildRules() {
 			rm.rules = append(rm.rules, rule)
 		}
 	}
-}
-
-func (rm *RuleManager) incrementRuleHit(siteID string) {
-	// No-op after stats removal
-}
-
-func (rm *RuleManager) GetRuleHitCounts() map[string]int64 {
-	return map[string]int64{}
 }
 
 func (rm *RuleManager) GetSiteGroups() []SiteGroup {

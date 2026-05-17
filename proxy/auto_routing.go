@@ -8,8 +8,6 @@ import (
 	"strings"
 	"sync"
 	"time"
-
-
 )
 
 // AutoRoutingMode defines the auto-routing preset.
@@ -19,7 +17,7 @@ const (
 	AutoRoutingOff            AutoRoutingMode = ""
 	AutoRoutingDefault        AutoRoutingMode = "default" // ECH / TLS-RF / direct
 	AutoRoutingServerFallback AutoRoutingMode = "server"  // + Server fallback
-	AutoRoutingGSA            AutoRoutingMode = "gsa"     // + GSA domain fronting
+	AutoRoutingGAS            AutoRoutingMode = "gas"     // + GAS domain fronting
 )
 
 // AutoRoutingConfig is persisted in settings.json.
@@ -41,11 +39,13 @@ var cloudflareCIDRStrings = []string{
 // AutoRouter makes per-request routing decisions for domains not covered by
 // manual SiteGroup rules.
 type AutoRouter struct {
+	configMu    sync.RWMutex
 	config      AutoRoutingConfig
 	gfwList     *GFWList
 	cfNets      []*net.IPNet
 	cfCache     map[string]cfCacheEntry
 	cfCacheMu   sync.RWMutex
+	cfCacheStop chan struct{}
 	dohResolver *FailoverResolver
 }
 
@@ -61,6 +61,7 @@ func NewAutoRouter(config AutoRoutingConfig, dohResolver *FailoverResolver) *Aut
 		config:      config,
 		gfwList:     NewGFWList(),
 		cfCache:     make(map[string]cfCacheEntry),
+		cfCacheStop: make(chan struct{}),
 		dohResolver: dohResolver,
 	}
 	ar.cfNets = make([]*net.IPNet, 0, len(cloudflareCIDRStrings))
@@ -72,7 +73,33 @@ func NewAutoRouter(config AutoRoutingConfig, dohResolver *FailoverResolver) *Aut
 		}
 		ar.cfNets = append(ar.cfNets, network)
 	}
+	go ar.cfCacheCleanupLoop()
 	return ar
+}
+
+func (ar *AutoRouter) cfCacheCleanupLoop() {
+	ticker := time.NewTicker(10 * time.Minute)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ticker.C:
+			ar.cfCacheMu.Lock()
+			now := time.Now()
+			for host, entry := range ar.cfCache {
+				if now.Sub(entry.checkedAt) > cfCacheTTL {
+					delete(ar.cfCache, host)
+				}
+			}
+			ar.cfCacheMu.Unlock()
+		case <-ar.cfCacheStop:
+			return
+		}
+	}
+}
+
+// StopCleanup stops the background cache cleanup goroutine.
+func (ar *AutoRouter) StopCleanup() {
+	close(ar.cfCacheStop)
 }
 
 func (ar *AutoRouter) isCloudflareIP(ip net.IP) bool {
@@ -105,7 +132,9 @@ func (ar *AutoRouter) IsCloudflare(host string) bool {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		ips, err := ar.dohResolver.ResolveIPAddrs(ctx, host)
-		if err == nil {
+		if err != nil {
+			log.Printf("[AutoRoute] DoH resolution failed for %s: %v", host, err)
+		} else {
 			for _, ip := range ips {
 				if ar.isCloudflareIP(ip) {
 					isCF = true
@@ -113,6 +142,8 @@ func (ar *AutoRouter) IsCloudflare(host string) bool {
 				}
 			}
 		}
+	} else {
+		log.Printf("[AutoRoute] No DoH resolver available for %s, cannot determine Cloudflare status", host)
 	}
 
 	ar.cfCacheMu.Lock()
@@ -127,13 +158,17 @@ func (ar *AutoRouter) IsCloudflare(host string) bool {
 
 // Decide returns a synthetic Rule for a host not covered by manual rules.
 func (ar *AutoRouter) Decide(host string) Rule {
-	if ar.config.Mode == AutoRoutingOff || ar.config.Mode == "" {
+	ar.configMu.RLock()
+	mode := ar.config.Mode
+	ar.configMu.RUnlock()
+
+	if mode == AutoRoutingOff || mode == "" {
 		return Rule{Mode: "direct", Enabled: true}
 	}
 
-	// GSA mode: all traffic through GSA tunnel, no GFW list needed
-	if ar.config.Mode == AutoRoutingGSA {
-		return Rule{Mode: "gsa", Enabled: true, AutoRouted: true}
+	// GAS mode: all traffic through GAS tunnel, no GFW list needed
+	if mode == AutoRoutingGAS {
+		return Rule{Mode: "gas", Enabled: true, AutoRouted: true}
 	}
 
 	if !ar.gfwList.IsBlocked(host) {
@@ -160,7 +195,7 @@ func (ar *AutoRouter) Decide(host string) Rule {
 		Enabled:    true,
 		AutoRouted: true,
 	}
-	if ar.config.Mode == AutoRoutingServerFallback {
+	if mode == AutoRoutingServerFallback {
 		rule.FallbackMode = "server"
 	}
 	return rule
@@ -171,10 +206,14 @@ func (ar *AutoRouter) GetGFWList() *GFWList {
 }
 
 func (ar *AutoRouter) UpdateConfig(config AutoRoutingConfig) {
+	ar.configMu.Lock()
 	ar.config = config
+	ar.configMu.Unlock()
 }
 
 func (ar *AutoRouter) GetConfig() AutoRoutingConfig {
+	ar.configMu.RLock()
+	defer ar.configMu.RUnlock()
 	return ar.config
 }
 
@@ -188,12 +227,18 @@ type GFWListStatus struct {
 }
 
 func (ar *AutoRouter) GetStatus() GFWListStatus {
+	ar.configMu.RLock()
+	mode := ar.config.Mode
+	lastUpdate := ar.config.LastUpdate
+	gfwListURL := ar.config.GFWListURL
+	ar.configMu.RUnlock()
+
 	return GFWListStatus{
-		Enabled:     ar.config.Mode != "" && ar.config.Mode != AutoRoutingOff,
-		Mode:        string(ar.config.Mode),
+		Enabled:     mode != "" && mode != AutoRoutingOff,
+		Mode:        string(mode),
 		DomainCount: ar.gfwList.Count(),
-		LastUpdate:  ar.config.LastUpdate,
-		GFWListURL:  ar.config.GFWListURL,
+		LastUpdate:  lastUpdate,
+		GFWListURL:  gfwListURL,
 	}
 }
 

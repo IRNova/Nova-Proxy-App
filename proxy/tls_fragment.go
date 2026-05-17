@@ -316,6 +316,9 @@ func sendRecords(conn net.Conn, clientHello []byte, offset, length, records, seg
 
 	if records == 1 {
 		if oobex {
+			if len(clientHello) < 20 {
+				return wrap("oob: clientHello too short", nil)
+			}
 			if err := sendWithOOB(conn, clientHello[:15], clientHello[15]); err != nil {
 				return wrap("oob 1", err)
 			}
@@ -495,7 +498,7 @@ func (e *wrappedError) Error() string {
 	return e.msg + ": " + e.cause.Error()
 }
 
-func (e *wrappedError) Unwarp() error {
+func (e *wrappedError) Unwrap() error {
 	return e.cause
 }
 

@@ -36,26 +36,26 @@ import (
 )
 
 const (
-	gsaRelayTimeout      = 25
-	gsaTLSConnectTimeout = 15
-	gsaMaxRespBody       = 200 * 1024 * 1024
-	gsaPoolMax           = 50
-	gsaConnTTL           = 45.0
-	gsaCacheMaxMB        = 50
-	gsaCacheTTLLong      = 3600
-	gsaCacheTTLMed       = 1800
-	gsaCacheTTLMax       = 86400
-	gsaBatchMax          = 50
-	gsaBatchWindow       = 5 * time.Millisecond
+	gasRelayTimeout      = 25
+	gasTLSConnectTimeout = 15
+	gasMaxRespBody       = 200 * 1024 * 1024
+	gasPoolMax           = 20
+	gasConnTTL           = 30.0
+	gasCacheMaxMB        = 50
+	gasCacheTTLLong      = 3600
+	gasCacheTTLMed       = 1800
+	gasCacheTTLMax       = 86400
+	gasBatchMax          = 30
+	gasBatchWindow       = 10 * time.Millisecond
 )
 
-var gsaStaticExts = []string{
+var gasStaticExts = []string{
 	".css", ".js", ".mjs", ".woff", ".woff2", ".ttf", ".eot",
 	".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".ico",
 	".mp3", ".mp4", ".webm", ".wasm", ".avif",
 }
 
-type gsaHostStat struct {
+type gasHostStat struct {
 	Requests       int
 	CacheHits      int
 	Bytes          int
@@ -63,7 +63,7 @@ type gsaHostStat struct {
 	Errors         int
 }
 
-type gsaRelay struct {
+type gasRelay struct {
 	connectHost string
 	sniHost     string
 	sniHosts    []string
@@ -81,18 +81,18 @@ type gsaRelay struct {
 	h2Client *http.Client
 
 	poolMu sync.Mutex
-	pool   []gsaPooledConn
+	pool   []gasPooledConn
 
 	batchMu      sync.Mutex
-	batchPending []gsaBatchItem
+	batchPending []gasBatchItem
 	batchTimer   *time.Timer
 
 	coalesceMu sync.Mutex
 	coalesce   map[string][]chan []byte
 
-	cache *gsaResponseCache
+	cache *gasResponseCache
 
-	perSite   map[string]*gsaHostStat
+	perSite   map[string]*gasHostStat
 	statsMu   sync.RWMutex
 	statsStop chan struct{}
 
@@ -106,39 +106,42 @@ type gsaRelay struct {
 	heartbeatStop chan struct{}
 	lastRelayOK   bool
 	relayFail     int
+
+	closeMu sync.Mutex
+	closed  bool
 }
 
-type gsaPooledConn struct {
+type gasPooledConn struct {
 	conn    net.Conn
 	created time.Time
 }
 
-type gsaBatchItem struct {
+type gasBatchItem struct {
 	payload map[string]any
 	respCh  chan []byte
 }
 
-type gsaResponseCache struct {
+type gasResponseCache struct {
 	mu    sync.Mutex
-	store map[string]gsaCacheEntry
+	store map[string]gasCacheEntry
 	order []string
 	size  int
 	max   int
 }
 
-type gsaCacheEntry struct {
+type gasCacheEntry struct {
 	raw     []byte
 	expires time.Time
 }
 
-func newGSARelay(cfg GSAConfig) *gsaRelay {
-	fronts := buildGSASNIPool(cfg.FrontDomain, cfg.FrontDomains)
+func newGASRelay(cfg GASConfig) *gasRelay {
+	fronts := buildGASSNIPool(cfg.FrontDomain, cfg.FrontDomains)
 	ids := cfg.ScriptIDs
 	if len(ids) == 0 && cfg.ScriptID != "" {
 		ids = []string{cfg.ScriptID}
 	}
 
-	r := &gsaRelay{
+	r := &gasRelay{
 		connectHost:   cfg.GoogleIP,
 		sniHost:       cfg.FrontDomain,
 		sniHosts:      fronts,
@@ -149,23 +152,23 @@ func newGSARelay(cfg GSAConfig) *gsaRelay {
 		relayTO:       time.Duration(cfg.RelayTimeout) * time.Second,
 		tlsTO:         time.Duration(cfg.TLSConnectTimeout) * time.Second,
 		coalesce:      map[string][]chan []byte{},
-		cache:         newGSACache(gsaCacheMaxMB),
-		perSite:       map[string]*gsaHostStat{},
+		cache:         newGASCache(gasCacheMaxMB),
+		perSite:       map[string]*gasHostStat{},
 		statsStop:     make(chan struct{}),
 		heartbeatStop: make(chan struct{}),
 	}
 	if cfg.RelayTimeout <= 0 {
-		r.relayTO = gsaRelayTimeout * time.Second
+		r.relayTO = gasRelayTimeout * time.Second
 	}
 	if cfg.TLSConnectTimeout <= 0 {
-		r.tlsTO = gsaTLSConnectTimeout * time.Second
+		r.tlsTO = gasTLSConnectTimeout * time.Second
 	}
-	log.Printf("[GSA] Relay initialized: connect=%s front=%s ids=%d", cfg.GoogleIP, cfg.FrontDomain, len(ids))
+	log.Printf("[GAS] Relay initialized: connect=%s front=%s ids=%d", cfg.GoogleIP, cfg.FrontDomain, len(ids))
 	go r.heartbeatLoop()
 	return r
 }
 
-func buildGSASNIPool(frontDomain string, overrides []string) []string {
+func buildGASSNIPool(frontDomain string, overrides []string) []string {
 	if len(overrides) > 0 {
 		seen := map[string]bool{}
 		out := []string{}
@@ -194,12 +197,15 @@ func buildGSASNIPool(frontDomain string, overrides []string) []string {
 	return pool
 }
 
-func (r *gsaRelay) nextSNI() string {
+func (r *gasRelay) nextSNI() string {
 	idx := atomic.AddUint32(&r.sniIdx, 1)
+	if len(r.sniHosts) == 0 {
+		return "www.google.com"
+	}
 	return r.sniHosts[int(idx)%len(r.sniHosts)]
 }
 
-func (r *gsaRelay) ensureH2() {
+func (r *gasRelay) ensureH2() {
 	r.h2Mu.Lock()
 	defer r.h2Mu.Unlock()
 	if r.h2Client != nil {
@@ -214,13 +220,18 @@ func (r *gsaRelay) ensureH2() {
 				InsecureSkipVerify: !r.verifySSL,
 				NextProtos:         []string{"h2", "http/1.1"},
 			}
-			dialer := &net.Dialer{Timeout: r.tlsTO}
+			dialer := &net.Dialer{
+				Timeout:   r.tlsTO,
+				KeepAlive: 15 * time.Second,
+			}
 			conn, err := dialer.DialContext(ctx, network, net.JoinHostPort(r.connectHost, "443"))
 			if err != nil {
 				return nil, err
 			}
 			if tcp, ok := conn.(*net.TCPConn); ok {
 				_ = tcp.SetNoDelay(true)
+				_ = tcp.SetKeepAlive(true)
+				_ = tcp.SetKeepAlivePeriod(15 * time.Second)
 			}
 			tlsConn := tls.Client(conn, tlsCfg)
 			if err := tlsConn.HandshakeContext(ctx); err != nil {
@@ -235,10 +246,10 @@ func (r *gsaRelay) ensureH2() {
 		},
 	}
 	r.h2Client = &http.Client{Transport: tr}
-	log.Printf("[GSA] H2 transport ready -> %s", r.connectHost)
+	log.Printf("[GAS] H2 transport ready -> %s", r.connectHost)
 }
 
-func (r *gsaRelay) resetH2() {
+func (r *gasRelay) resetH2() {
 	r.h2Mu.Lock()
 	defer r.h2Mu.Unlock()
 	if r.h2Client != nil {
@@ -249,7 +260,7 @@ func (r *gsaRelay) resetH2() {
 	r.h2Client = nil
 }
 
-func (r *gsaRelay) h2Request(ctx context.Context, method, path, host string, headers map[string]string, body []byte, timeout time.Duration) (int, map[string]string, []byte, error) {
+func (r *gasRelay) h2Request(ctx context.Context, method, path, host string, headers map[string]string, body []byte, timeout time.Duration) (int, map[string]string, []byte, error) {
 	r.ensureH2()
 	tH2Start := time.Now()
 	if !strings.HasPrefix(path, "/") {
@@ -272,14 +283,22 @@ func (r *gsaRelay) h2Request(ctx context.Context, method, path, host string, hea
 	resp, err := r.h2Client.Do(req)
 	dH2 := time.Since(tH2Start)
 	if err != nil {
-		log.Printf("[GSA-H2] %s %s failed after %v: %v", method, path, dH2, err)
+		log.Printf("[GAS-H2] %s %s failed after %v: %v", method, path, dH2, err)
 		r.resetH2()
-		return 0, nil, nil, err
+		// Retry once with a fresh H2 connection
+		r.ensureH2()
+		tRetry := time.Now()
+		resp, err = r.h2Client.Do(req)
+		if err != nil {
+			log.Printf("[GAS-H2] %s %s retry also failed after %v: %v", method, path, time.Since(tRetry), err)
+			return 0, nil, nil, err
+		}
+		log.Printf("[GAS-H2] %s %s recovered after retry", method, path)
 	}
 	defer resp.Body.Close()
 
 	if dH2 > 3*time.Second {
-		log.Printf("[GSA-H2] %s %s slow response: %v (status=%d)", method, path, dH2, resp.StatusCode)
+		log.Printf("[GAS-H2] %s %s slow response: %v (status=%d)", method, path, dH2, resp.StatusCode)
 	}
 
 	data, err := io.ReadAll(resp.Body)
@@ -293,12 +312,12 @@ func (r *gsaRelay) h2Request(ctx context.Context, method, path, host string, hea
 		}
 	}
 	if enc := respHeaders["content-encoding"]; enc != "" {
-		data = gsaDecodeContent(data, enc)
+		data = gasDecodeContent(data, enc)
 	}
 	return resp.StatusCode, respHeaders, data, nil
 }
 
-func (r *gsaRelay) relayRequest(method, urlStr string, headers map[string]string, body []byte) []byte {
+func (r *gasRelay) relayRequest(method, urlStr string, headers map[string]string, body []byte) []byte {
 	start := time.Now()
 	payload := r.buildPayload(method, urlStr, headers, body)
 	errored := false
@@ -311,7 +330,7 @@ func (r *gsaRelay) relayRequest(method, urlStr string, headers map[string]string
 		resp, err := r.relaySingle(payload)
 		if err != nil {
 			errored = true
-			return gsaErrorResponse(502, err.Error())
+			return gasErrorResponse(502, err.Error())
 		}
 		return resp
 	}
@@ -328,16 +347,16 @@ func (r *gsaRelay) relayRequest(method, urlStr string, headers map[string]string
 	resp, err := r.batchSubmit(payload)
 	dReq := time.Since(start)
 	if dReq > 10*time.Second {
-		log.Printf("[GSA-WATCHDOG] relayRequest %s %s took %v (errored=%v)", method, urlStr, dReq, err != nil)
+		log.Printf("[GAS-WATCHDOG] relayRequest %s %s took %v (errored=%v)", method, urlStr, dReq, err != nil)
 	}
 	if err != nil {
 		errored = true
-		return gsaErrorResponse(502, err.Error())
+		return gasErrorResponse(502, err.Error())
 	}
 	return resp
 }
 
-func (r *gsaRelay) buildPayload(method, urlStr string, headers map[string]string, body []byte) map[string]any {
+func (r *gasRelay) buildPayload(method, urlStr string, headers map[string]string, body []byte) map[string]any {
 	p := map[string]any{
 		"m": method,
 		"u": urlStr,
@@ -355,7 +374,7 @@ func (r *gsaRelay) buildPayload(method, urlStr string, headers map[string]string
 	return p
 }
 
-func (r *gsaRelay) scriptIDForKey(key string) string {
+func (r *gasRelay) scriptIDForKey(key string) string {
 	if len(r.scriptIDs) <= 1 {
 		if len(r.scriptIDs) == 1 {
 			return r.scriptIDs[0]
@@ -371,12 +390,12 @@ func (r *gsaRelay) scriptIDForKey(key string) string {
 	return r.scriptIDs[idx]
 }
 
-func (r *gsaRelay) execPath(urlOrHost any) string {
-	sid := r.scriptIDForKey(gsaHostKey(fmt.Sprint(urlOrHost)))
+func (r *gasRelay) execPath(urlOrHost any) string {
+	sid := r.scriptIDForKey(gasHostKey(fmt.Sprint(urlOrHost)))
 	return "/macros/s/" + sid + "/exec"
 }
 
-func gsaHostKey(urlOrHost string) string {
+func gasHostKey(urlOrHost string) string {
 	if urlOrHost == "" {
 		return ""
 	}
@@ -389,7 +408,7 @@ func gsaHostKey(urlOrHost string) string {
 	return strings.ToLower(strings.TrimSuffix(urlOrHost, "."))
 }
 
-func (r *gsaRelay) relaySingle(payload map[string]any) ([]byte, error) {
+func (r *gasRelay) relaySingle(payload map[string]any) ([]byte, error) {
 	full := map[string]any{}
 	for k, v := range payload {
 		full[k] = v
@@ -411,13 +430,13 @@ func (r *gsaRelay) relaySingle(payload map[string]any) ([]byte, error) {
 	return r.parseRelayResponse(resp), nil
 }
 
-func (r *gsaRelay) batchSubmit(payload map[string]any) ([]byte, error) {
+func (r *gasRelay) batchSubmit(payload map[string]any) ([]byte, error) {
 	respCh := make(chan []byte, 1)
-	item := gsaBatchItem{payload: payload, respCh: respCh}
+	item := gasBatchItem{payload: payload, respCh: respCh}
 
 	r.batchMu.Lock()
 	r.batchPending = append(r.batchPending, item)
-	if len(r.batchPending) >= gsaBatchMax {
+	if len(r.batchPending) >= gasBatchMax {
 		pending := r.batchPending
 		r.batchPending = nil
 		if r.batchTimer != nil {
@@ -429,7 +448,7 @@ func (r *gsaRelay) batchSubmit(payload map[string]any) ([]byte, error) {
 		return <-respCh, nil
 	}
 	if r.batchTimer == nil {
-		r.batchTimer = time.AfterFunc(gsaBatchWindow, func() {
+		r.batchTimer = time.AfterFunc(gasBatchWindow, func() {
 			r.batchMu.Lock()
 			pending := r.batchPending
 			r.batchPending = nil
@@ -444,11 +463,11 @@ func (r *gsaRelay) batchSubmit(payload map[string]any) ([]byte, error) {
 	return <-respCh, nil
 }
 
-func (r *gsaRelay) flushBatch(batch []gsaBatchItem) {
+func (r *gasRelay) flushBatch(batch []gasBatchItem) {
 	if len(batch) == 1 {
 		resp, err := r.relaySingle(batch[0].payload)
 		if err != nil {
-			resp = gsaErrorResponse(502, err.Error())
+			resp = gasErrorResponse(502, err.Error())
 		}
 		batch[0].respCh <- resp
 		return
@@ -456,7 +475,7 @@ func (r *gsaRelay) flushBatch(batch []gsaBatchItem) {
 	results, err := r.relayBatch(batch)
 	if err != nil {
 		for _, item := range batch {
-			item.respCh <- gsaErrorResponse(502, err.Error())
+			item.respCh <- gasErrorResponse(502, err.Error())
 		}
 		return
 	}
@@ -465,7 +484,7 @@ func (r *gsaRelay) flushBatch(batch []gsaBatchItem) {
 	}
 }
 
-func (r *gsaRelay) relayBatch(batch []gsaBatchItem) ([][]byte, error) {
+func (r *gasRelay) relayBatch(batch []gasBatchItem) ([][]byte, error) {
 	payloads := []map[string]any{}
 	for _, item := range batch {
 		payloads = append(payloads, item.payload)
@@ -489,45 +508,100 @@ func (r *gsaRelay) relayBatch(batch []gsaBatchItem) ([][]byte, error) {
 	return r.parseBatchBody(resp, len(batch))
 }
 
-func (r *gsaRelay) relayHTTP1(path string, body []byte) ([]byte, error) {
+func (r *gasRelay) relayHTTP1(path string, body []byte) ([]byte, error) {
 	tHTTP1 := time.Now()
 	conn, err := r.acquireConn()
 	if err != nil {
-		log.Printf("[GSA-H1] acquireConn failed for %s: %v", path, err)
+		log.Printf("[GAS-H1] acquireConn failed for %s: %v", path, err)
 		return nil, err
 	}
-	defer r.releaseConn(conn)
+	released := false
+	defer func() {
+		if !released {
+			r.releaseConn(conn)
+		}
+	}()
 
 	req := fmt.Sprintf("POST %s HTTP/1.1\r\nHost: %s\r\nContent-Type: application/json\r\nContent-Length: %d\r\nAccept-Encoding: gzip\r\nConnection: keep-alive\r\n\r\n", path, r.httpHost, len(body))
 	if _, err := conn.Write([]byte(req)); err != nil {
-		return nil, err
-	}
-	if _, err := conn.Write(body); err != nil {
-		return nil, err
+		_ = conn.Close()
+		// Retry once with a fresh connection
+		log.Printf("[GAS-H1] write failed for %s: %v — retrying with new connection", path, err)
+		conn, err = r.acquireConn()
+		if err != nil {
+			return nil, err
+		}
+		if _, err := conn.Write([]byte(req)); err != nil {
+			_ = conn.Close()
+			return nil, err
+		}
+		if _, err := conn.Write(body); err != nil {
+			_ = conn.Close()
+			return nil, err
+		}
+	} else {
+		if _, err := conn.Write(body); err != nil {
+			_ = conn.Close()
+			conn, err = r.acquireConn()
+			if err != nil {
+				return nil, err
+			}
+			// Re-send full request on new connection
+			if _, err := conn.Write([]byte(req)); err != nil {
+				_ = conn.Close()
+				return nil, err
+			}
+			if _, err := conn.Write(body); err != nil {
+				_ = conn.Close()
+				return nil, err
+			}
+		}
 	}
 
-	status, _, respBody, err := gsaReadHTTPResponse(conn, gsaMaxRespBody)
+	status, _, respBody, err := gasReadHTTPResponse(conn, gasMaxRespBody)
 	if err != nil {
-		log.Printf("[GSA-H1] read failed for %s: %v", path, err)
-		return nil, err
+		_ = conn.Close()
+		// Retry once with fresh connection
+		log.Printf("[GAS-H1] read failed for %s: %v — retrying with new connection", path, err)
+		conn2, err2 := r.acquireConn()
+		if err2 != nil {
+			return nil, err2
+		}
+		if _, err2 := conn2.Write([]byte(req)); err2 != nil {
+			_ = conn2.Close()
+			return nil, err2
+		}
+		if _, err2 := conn2.Write(body); err2 != nil {
+			_ = conn2.Close()
+			return nil, err2
+		}
+		status, _, respBody, err = gasReadHTTPResponse(conn2, gasMaxRespBody)
+		if err != nil {
+			_ = conn2.Close()
+			return nil, err
+		}
+		conn = conn2
 	}
+	r.releaseConn(conn)
+	released = true
+
 	if status >= 300 && status < 400 {
 		return nil, fmt.Errorf("unexpected redirect: %d", status)
 	}
 	dH1 := time.Since(tHTTP1)
 	if dH1 > 3*time.Second {
-		log.Printf("[GSA-H1] slow: %s took %v (status=%d)", path, dH1, status)
+		log.Printf("[GAS-H1] slow: %s took %v (status=%d)", path, dH1, status)
 	}
-	log.Printf("[GSA-H1] %s: %v (status=%d)", path, dH1, status)
+	log.Printf("[GAS-H1] %s: %v (status=%d)", path, dH1, status)
 	return respBody, nil
 }
 
-func (r *gsaRelay) acquireConn() (net.Conn, error) {
+func (r *gasRelay) acquireConn() (net.Conn, error) {
 	r.poolMu.Lock()
 	for len(r.pool) > 0 {
 		pc := r.pool[len(r.pool)-1]
 		r.pool = r.pool[:len(r.pool)-1]
-		if time.Since(pc.created) < time.Duration(gsaConnTTL*float64(time.Second)) {
+		if time.Since(pc.created) < time.Duration(gasConnTTL*float64(time.Second)) {
 			r.poolMu.Unlock()
 			return pc.conn, nil
 		}
@@ -535,13 +609,18 @@ func (r *gsaRelay) acquireConn() (net.Conn, error) {
 	}
 	r.poolMu.Unlock()
 
-	dialer := &net.Dialer{Timeout: r.tlsTO}
+	dialer := &net.Dialer{
+		Timeout:   r.tlsTO,
+		KeepAlive: 15 * time.Second,
+	}
 	conn, err := dialer.Dial("tcp", net.JoinHostPort(r.connectHost, "443"))
 	if err != nil {
 		return nil, err
 	}
 	if tcp, ok := conn.(*net.TCPConn); ok {
 		_ = tcp.SetNoDelay(true)
+		_ = tcp.SetKeepAlive(true)
+		_ = tcp.SetKeepAlivePeriod(15 * time.Second)
 	}
 	tlsConn := tls.Client(conn, &tls.Config{ServerName: r.nextSNI(), InsecureSkipVerify: !r.verifySSL})
 	if err := tlsConn.Handshake(); err != nil {
@@ -551,31 +630,35 @@ func (r *gsaRelay) acquireConn() (net.Conn, error) {
 	return tlsConn, nil
 }
 
-func (r *gsaRelay) releaseConn(conn net.Conn) {
+func (r *gasRelay) releaseConn(conn net.Conn) {
 	r.poolMu.Lock()
 	defer r.poolMu.Unlock()
-	if len(r.pool) >= gsaPoolMax {
+	if len(r.pool) >= gasPoolMax {
 		_ = conn.Close()
 		return
 	}
-	r.pool = append(r.pool, gsaPooledConn{conn: conn, created: time.Now()})
+	r.pool = append(r.pool, gasPooledConn{conn: conn, created: time.Now()})
 }
 
-func (r *gsaRelay) tryCoalesce(key string, payload map[string]any) ([]byte, bool) {
+func (r *gasRelay) tryCoalesce(key string, payload map[string]any) ([]byte, bool) {
 	r.coalesceMu.Lock()
 	if waiters, ok := r.coalesce[key]; ok {
 		ch := make(chan []byte, 1)
 		r.coalesce[key] = append(waiters, ch)
 		r.coalesceMu.Unlock()
-		resp := <-ch
-		return resp, true
+		select {
+		case resp := <-ch:
+			return resp, true
+		case <-time.After(30 * time.Second):
+			return nil, false
+		}
 	}
 	r.coalesce[key] = []chan []byte{}
 	r.coalesceMu.Unlock()
 
 	resp, err := r.batchSubmit(payload)
 	if err != nil {
-		resp = gsaErrorResponse(502, err.Error())
+		resp = gasErrorResponse(502, err.Error())
 	}
 
 	r.coalesceMu.Lock()
@@ -588,7 +671,7 @@ func (r *gsaRelay) tryCoalesce(key string, payload map[string]any) ([]byte, bool
 	return resp, true
 }
 
-func (r *gsaRelay) isStatefulRequest(method, urlStr string, headers map[string]string, body []byte) bool {
+func (r *gasRelay) isStatefulRequest(method, urlStr string, headers map[string]string, body []byte) bool {
 	method = strings.ToUpper(method)
 	if method != "GET" && method != "HEAD" {
 		return true
@@ -611,16 +694,16 @@ func (r *gsaRelay) isStatefulRequest(method, urlStr string, headers map[string]s
 	if fetchMode == "navigate" || fetchMode == "cors" {
 		return true
 	}
-	return !gsaIsStaticAsset(urlStr)
+	return !gasIsStaticAsset(urlStr)
 }
 
-func gsaIsStaticAsset(urlStr string) bool {
+func gasIsStaticAsset(urlStr string) bool {
 	parsed, err := url.Parse(urlStr)
 	if err != nil {
 		return false
 	}
 	path := strings.ToLower(parsed.Path)
-	for _, ext := range gsaStaticExts {
+	for _, ext := range gasStaticExts {
 		if strings.HasSuffix(path, ext) {
 			return true
 		}
@@ -628,7 +711,7 @@ func gsaIsStaticAsset(urlStr string) bool {
 	return false
 }
 
-func (r *gsaRelay) coalesceKey(urlStr string, headers map[string]string) string {
+func (r *gasRelay) coalesceKey(urlStr string, headers map[string]string) string {
 	key := []string{urlStr}
 	if headers != nil {
 		for _, name := range []string{"accept", "accept-language", "user-agent", "sec-fetch-dest", "sec-fetch-mode", "sec-fetch-site"} {
@@ -640,29 +723,29 @@ func (r *gsaRelay) coalesceKey(urlStr string, headers map[string]string) string 
 	return strings.Join(key, "\n")
 }
 
-func (r *gsaRelay) parseRelayResponse(body []byte) []byte {
+func (r *gasRelay) parseRelayResponse(body []byte) []byte {
 	text := strings.TrimSpace(string(body))
 	if text == "" {
-		return gsaErrorResponse(502, "Empty response from relay")
+		return gasErrorResponse(502, "Empty response from relay")
 	}
 	var data map[string]any
 	if err := json.Unmarshal([]byte(text), &data); err != nil {
 		m := regexp.MustCompile(`\{.*\}`).FindString(text)
 		if m == "" {
-			return gsaErrorResponse(502, "No JSON: "+gsaTruncate(text, 200))
+			return gasErrorResponse(502, "No JSON: "+gasTruncate(text, 200))
 		}
 		if err := json.Unmarshal([]byte(m), &data); err != nil {
-			return gsaErrorResponse(502, "Bad JSON: "+gsaTruncate(text, 200))
+			return gasErrorResponse(502, "Bad JSON: "+gasTruncate(text, 200))
 		}
 	}
 	return r.parseRelayJSON(data)
 }
 
-func (r *gsaRelay) parseRelayJSON(data map[string]any) []byte {
+func (r *gasRelay) parseRelayJSON(data map[string]any) []byte {
 	if e, ok := data["e"]; ok {
-		return gsaErrorResponse(502, fmt.Sprintf("Relay error: %v", e))
+		return gasErrorResponse(502, fmt.Sprintf("Relay error: %v", e))
 	}
-	status := gsaIntVal(data["s"], 200)
+	status := gasIntVal(data["s"], 200)
 	headers := map[string]any{}
 	if h, ok := data["h"].(map[string]any); ok {
 		headers = h
@@ -672,8 +755,8 @@ func (r *gsaRelay) parseRelayJSON(data map[string]any) []byte {
 		bodyRaw = b
 	}
 	decodedBody, _ := base64.StdEncoding.DecodeString(bodyRaw)
-	if len(decodedBody) > gsaMaxRespBody {
-		return gsaErrorResponse(502, "Relay response exceeds cap")
+	if len(decodedBody) > gasMaxRespBody {
+		return gasErrorResponse(502, "Relay response exceeds cap")
 	}
 
 	statusText := "OK"
@@ -723,7 +806,7 @@ func (r *gsaRelay) parseRelayJSON(data map[string]any) []byte {
 	return buf.Bytes()
 }
 
-func (r *gsaRelay) parseBatchBody(body []byte, expected int) ([][]byte, error) {
+func (r *gasRelay) parseBatchBody(body []byte, expected int) ([][]byte, error) {
 	text := strings.TrimSpace(string(body))
 	var data map[string]any
 	if err := json.Unmarshal([]byte(text), &data); err != nil {
@@ -745,20 +828,20 @@ func (r *gsaRelay) parseBatchBody(body []byte, expected int) ([][]byte, error) {
 	return results, nil
 }
 
-func (r *gsaRelay) recordStats(urlStr string, bodyLen int, start time.Time, errored bool) {
+func (r *gasRelay) recordStats(urlStr string, bodyLen int, start time.Time, errored bool) {
 	latency := time.Since(start).Nanoseconds()
 	atomic.AddInt64(&r.reqCount, 1)
 	atomic.AddInt64(&r.bwBytes, int64(bodyLen))
 	atomic.StoreInt64(&r.lastLatency, latency/1e6)
 
-	host := gsaHostKey(urlStr)
+	host := gasHostKey(urlStr)
 	if host == "" {
 		return
 	}
 	r.statsMu.Lock()
 	stat, ok := r.perSite[host]
 	if !ok {
-		stat = &gsaHostStat{}
+		stat = &gasHostStat{}
 		r.perSite[host] = stat
 	}
 	stat.Requests++
@@ -777,15 +860,15 @@ func (r *gsaRelay) recordStats(urlStr string, bodyLen int, start time.Time, erro
 	}
 }
 
-func (r *gsaRelay) recordCacheHit() {
+func (r *gasRelay) recordCacheHit() {
 	atomic.AddInt64(&r.cacheHits, 1)
 }
 
-func (r *gsaRelay) recordCacheMiss() {
+func (r *gasRelay) recordCacheMiss() {
 	atomic.AddInt64(&r.cacheMisses, 1)
 }
 
-func (r *gsaRelay) heartbeatLoop() {
+func (r *gasRelay) heartbeatLoop() {
 	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()
 	for {
@@ -798,7 +881,7 @@ func (r *gsaRelay) heartbeatLoop() {
 	}
 }
 
-func (r *gsaRelay) pingRelay() {
+func (r *gasRelay) pingRelay() {
 	tStart := time.Now()
 	path := r.execPath("ping")
 	body := map[string]any{"k": r.authKey, "m": "GET", "u": "https://ping/", "r": false}
@@ -811,12 +894,12 @@ func (r *gsaRelay) pingRelay() {
 	}
 	d := time.Since(tStart)
 
-	r.relayFail++
 	if err != nil {
-		log.Printf("[GSA-HEARTBEAT] FAIL after %v: %v (consecutive=%d)", d, err, r.relayFail)
+		r.relayFail++
+		log.Printf("[GAS-HEARTBEAT] FAIL after %v: %v (consecutive=%d)", d, err, r.relayFail)
 		r.lastRelayOK = false
 		if r.relayFail >= 3 {
-			log.Printf("[GSA-HEARTBEAT] CRITICAL: %d consecutive relay failures!", r.relayFail)
+			log.Printf("[GAS-HEARTBEAT] CRITICAL: %d consecutive relay failures!", r.relayFail)
 		}
 		r.resetH2()
 		return
@@ -826,20 +909,32 @@ func (r *gsaRelay) pingRelay() {
 	r.relayFail = 0
 	parsed := r.parseRelayResponse(resp)
 	if len(parsed) == 0 {
-		log.Printf("[GSA-HEARTBEAT] OK (%v) but empty response", d)
+		log.Printf("[GAS-HEARTBEAT] OK (%v) but empty response", d)
 		return
 	}
-	log.Printf("[GSA-HEARTBEAT] OK (%v)", d)
+	log.Printf("[GAS-HEARTBEAT] OK (%v)", d)
 }
 
-func (r *gsaRelay) close() {
+func (r *gasRelay) close() {
+	r.closeMu.Lock()
+	if r.closed {
+		r.closeMu.Unlock()
+		return
+	}
+	r.closed = true
+	r.closeMu.Unlock()
+
 	close(r.statsStop)
 	close(r.heartbeatStop)
+
+	r.h2Mu.Lock()
 	if r.h2Client != nil {
 		if tr, ok := r.h2Client.Transport.(*http2.Transport); ok {
 			tr.CloseIdleConnections()
 		}
 	}
+	r.h2Mu.Unlock()
+
 	r.poolMu.Lock()
 	for _, pc := range r.pool {
 		_ = pc.conn.Close()
@@ -848,15 +943,15 @@ func (r *gsaRelay) close() {
 	r.poolMu.Unlock()
 }
 
-func newGSACache(maxMB int) *gsaResponseCache {
-	return &gsaResponseCache{
-		store: map[string]gsaCacheEntry{},
+func newGASCache(maxMB int) *gasResponseCache {
+	return &gasResponseCache{
+		store: map[string]gasCacheEntry{},
 		order: []string{},
 		max:   maxMB * 1024 * 1024,
 	}
 }
 
-func (c *gsaResponseCache) get(url string) []byte {
+func (c *gasResponseCache) get(url string) []byte {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	entry, ok := c.store[url]
@@ -877,7 +972,7 @@ func (c *gsaResponseCache) get(url string) []byte {
 	return entry.raw
 }
 
-func (c *gsaResponseCache) put(url string, raw []byte, ttl int) {
+func (c *gasResponseCache) put(url string, raw []byte, ttl int) {
 	if len(raw) == 0 {
 		return
 	}
@@ -902,12 +997,12 @@ func (c *gsaResponseCache) put(url string, raw []byte, ttl int) {
 		}
 		c.size -= len(old.raw)
 	}
-	c.store[url] = gsaCacheEntry{raw: raw, expires: time.Now().Add(time.Duration(ttl) * time.Second)}
+	c.store[url] = gasCacheEntry{raw: raw, expires: time.Now().Add(time.Duration(ttl) * time.Second)}
 	c.order = append(c.order, url)
 	c.size += size
 }
 
-func (c *gsaResponseCache) parseTTL(raw []byte, urlStr string) int {
+func (c *gasResponseCache) parseTTL(raw []byte, urlStr string) int {
 	sep := []byte("\r\n\r\n")
 	idx := bytes.Index(raw, sep)
 	if idx < 0 {
@@ -923,22 +1018,22 @@ func (c *gsaResponseCache) parseTTL(raw []byte, urlStr string) int {
 	re := regexp.MustCompile(`max-age=(\d+)`)
 	if m := re.FindStringSubmatch(head); len(m) == 2 {
 		v, _ := strconv.Atoi(m[1])
-		if v > gsaCacheTTLMax {
-			return gsaCacheTTLMax
+		if v > gasCacheTTLMax {
+			return gasCacheTTLMax
 		}
 		return v
 	}
 	path := strings.ToLower(strings.Split(urlStr, "?")[0])
-	for _, ext := range gsaStaticExts {
+	for _, ext := range gasStaticExts {
 		if strings.HasSuffix(path, ext) {
-			return gsaCacheTTLLong
+			return gasCacheTTLLong
 		}
 	}
 	if strings.Contains(head, "image/") || strings.Contains(head, "font/") {
-		return gsaCacheTTLLong
+		return gasCacheTTLLong
 	}
 	if strings.Contains(head, "text/css") || strings.Contains(head, "javascript") {
-		return gsaCacheTTLMed
+		return gasCacheTTLMed
 	}
 	if strings.Contains(head, "text/html") || strings.Contains(head, "application/json") {
 		return 0
@@ -946,7 +1041,7 @@ func (c *gsaResponseCache) parseTTL(raw []byte, urlStr string) int {
 	return 0
 }
 
-func gsaDecodeContent(body []byte, encoding string) []byte {
+func gasDecodeContent(body []byte, encoding string) []byte {
 	if len(body) == 0 {
 		return body
 	}
@@ -957,24 +1052,24 @@ func gsaDecodeContent(body []byte, encoding string) []byte {
 	if strings.Contains(enc, ",") {
 		parts := strings.Split(enc, ",")
 		for i := len(parts) - 1; i >= 0; i-- {
-			body = gsaDecodeContent(body, strings.TrimSpace(parts[i]))
+			body = gasDecodeContent(body, strings.TrimSpace(parts[i]))
 		}
 		return body
 	}
 	switch enc {
 	case "gzip":
-		return gsaDecodeGzip(body)
+		return gasDecodeGzip(body)
 	case "deflate":
-		return gsaDecodeDeflate(body)
+		return gasDecodeDeflate(body)
 	case "br":
-		return gsaDecodeBrotli(body)
+		return gasDecodeBrotli(body)
 	case "zstd":
-		return gsaDecodeZstd(body)
+		return gasDecodeZstd(body)
 	}
 	return body
 }
 
-func gsaDecodeGzip(data []byte) []byte {
+func gasDecodeGzip(data []byte) []byte {
 	r, err := gzip.NewReader(bytes.NewReader(data))
 	if err != nil {
 		return data
@@ -987,7 +1082,7 @@ func gsaDecodeGzip(data []byte) []byte {
 	return out
 }
 
-func gsaDecodeDeflate(data []byte) []byte {
+func gasDecodeDeflate(data []byte) []byte {
 	r, err := zlib.NewReader(bytes.NewReader(data))
 	if err != nil {
 		return data
@@ -1000,7 +1095,7 @@ func gsaDecodeDeflate(data []byte) []byte {
 	return out
 }
 
-func gsaDecodeBrotli(data []byte) []byte {
+func gasDecodeBrotli(data []byte) []byte {
 	r := brotli.NewReader(bytes.NewReader(data))
 	out, err := io.ReadAll(r)
 	if err != nil {
@@ -1009,7 +1104,7 @@ func gsaDecodeBrotli(data []byte) []byte {
 	return out
 }
 
-func gsaDecodeZstd(data []byte) []byte {
+func gasDecodeZstd(data []byte) []byte {
 	r, err := zstd.NewReader(bytes.NewReader(data))
 	if err != nil {
 		return data
@@ -1022,7 +1117,7 @@ func gsaDecodeZstd(data []byte) []byte {
 	return out
 }
 
-func gsaReadHTTPResponse(conn net.Conn, maxBody int) (int, map[string]string, []byte, error) {
+func gasReadHTTPResponse(conn net.Conn, maxBody int) (int, map[string]string, []byte, error) {
 	reader := bufio.NewReaderSize(conn, 4096)
 	statusLine, err := reader.ReadString('\n')
 	if err != nil {
@@ -1067,24 +1162,24 @@ func gsaReadHTTPResponse(conn net.Conn, maxBody int) (int, map[string]string, []
 		body, _ = io.ReadAll(reader)
 	}
 	if enc := headers["content-encoding"]; enc != "" {
-		body = gsaDecodeContent(body, enc)
+		body = gasDecodeContent(body, enc)
 	}
 	return status, headers, body, nil
 }
 
-func gsaErrorResponse(status int, message string) []byte {
+func gasErrorResponse(status int, message string) []byte {
 	body := fmt.Sprintf("<html><body><h1>%d</h1><p>%s</p></body></html>", status, message)
 	return []byte(fmt.Sprintf("HTTP/1.1 %d Error\r\nContent-Type: text/html\r\nContent-Length: %d\r\n\r\n%s", status, len(body), body))
 }
 
-func gsaTruncate(s string, max int) string {
+func gasTruncate(s string, max int) string {
 	if len(s) <= max {
 		return s
 	}
 	return s[:max]
 }
 
-func gsaIntVal(v any, def int) int {
+func gasIntVal(v any, def int) int {
 	switch t := v.(type) {
 	case float64:
 		return int(t)
@@ -1107,7 +1202,7 @@ func headerValue(headers map[string]string, name string) string {
 	return ""
 }
 
-func gsaCORSPreflight(origin, acrMethod, acrHeaders string) []byte {
+func gasCORSPreflight(origin, acrMethod, acrHeaders string) []byte {
 	allowOrigin := origin
 	if allowOrigin == "" {
 		allowOrigin = "*"
@@ -1131,7 +1226,7 @@ func gsaCORSPreflight(origin, acrMethod, acrHeaders string) []byte {
 	return []byte(resp)
 }
 
-func gsaInjectCORS(response []byte, origin string) []byte {
+func gasInjectCORS(response []byte, origin string) []byte {
 	sep := []byte("\r\n\r\n")
 	idx := bytes.Index(response, sep)
 	if idx < 0 {
@@ -1164,20 +1259,20 @@ func gsaInjectCORS(response []byte, origin string) []byte {
 	return append([]byte(newHead), body...)
 }
 
-type gsaMITMManager struct {
+type gasMITMManager struct {
 	mu     sync.Mutex
 	caKey  crypto.Signer
 	caCert *x509.Certificate
 	cache  map[string]*tls.Certificate
 }
 
-func newGSAMITMManager() *gsaMITMManager {
-	m := &gsaMITMManager{cache: map[string]*tls.Certificate{}}
+func newGASMITMManager() *gasMITMManager {
+	m := &gasMITMManager{cache: map[string]*tls.Certificate{}}
 	m.ensureCA()
 	return m
 }
 
-func (m *gsaMITMManager) ensureCA() {
+func (m *gasMITMManager) ensureCA() {
 	caKey, _ := rsa.GenerateKey(rand.Reader, 2048)
 	now := time.Now().UTC()
 	serialLimit := new(big.Int).Lsh(big.NewInt(1), 128)
@@ -1185,8 +1280,8 @@ func (m *gsaMITMManager) ensureCA() {
 	ca := &x509.Certificate{
 		SerialNumber: serial,
 		Subject: pkix.Name{
-			CommonName:   "nova-gsa",
-			Organization: []string{"NovaProxy GSA"},
+			CommonName:   "nova-gas",
+			Organization: []string{"NovaProxy GAS"},
 		},
 		NotBefore:             now,
 		NotAfter:              now.AddDate(10, 0, 0),
@@ -1202,9 +1297,9 @@ func (m *gsaMITMManager) ensureCA() {
 }
 
 // useCA replaces the internal self-generated CA with an external one (e.g. Nova's CA).
-// This lets GSA sign per-host certs with the same CA that Nova uses for MITM,
+// This lets GAS sign per-host certs with the same CA that Nova uses for MITM,
 // so the user only needs to install one root CA.
-func (m *gsaMITMManager) useCA(caCert *x509.Certificate, caKey crypto.Signer) {
+func (m *gasMITMManager) useCA(caCert *x509.Certificate, caKey crypto.Signer) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.caCert = caCert
@@ -1213,7 +1308,7 @@ func (m *gsaMITMManager) useCA(caCert *x509.Certificate, caKey crypto.Signer) {
 	m.cache = map[string]*tls.Certificate{}
 }
 
-func (m *gsaMITMManager) getCert(domain string) (*tls.Certificate, error) {
+func (m *gasMITMManager) getCert(domain string) (*tls.Certificate, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if cert, ok := m.cache[domain]; ok {
@@ -1251,8 +1346,8 @@ func (m *gsaMITMManager) getCert(domain string) (*tls.Certificate, error) {
 	return &tlsCert, nil
 }
 
-type gsaProxyServer struct {
-	relay    *gsaRelay
+type gasProxyServer struct {
+	relay    *gasRelay
 	host     string
 	port     int
 	listener net.Listener
@@ -1260,10 +1355,10 @@ type gsaProxyServer struct {
 	cancel   context.CancelFunc
 	wg       sync.WaitGroup
 	started  chan struct{}
-	mitm     *gsaMITMManager
+	mitm     *gasMITMManager
 }
 
-func newGSAProxyServer(cfg GSAConfig, relay *gsaRelay, certGen CertGenerator) *gsaProxyServer {
+func newGASProxyServer(cfg GASConfig, relay *gasRelay, certGen CertGenerator) *gasProxyServer {
 	host := cfg.ListenHost
 	if host == "" {
 		host = "127.0.0.1"
@@ -1271,34 +1366,34 @@ func newGSAProxyServer(cfg GSAConfig, relay *gsaRelay, certGen CertGenerator) *g
 	if cfg.LANSharing && host == "127.0.0.1" {
 		host = "0.0.0.0"
 	}
-	mitm := newGSAMITMManager()
+	mitm := newGASMITMManager()
 
-	log.Printf("[GSA-MITM] newGSAProxyServer: certGen=%v", certGen != nil)
+	log.Printf("[GAS-MITM] newGASProxyServer: certGen=%v", certGen != nil)
 
 	// If Nova's CA is available, use it (so user installs only one root CA)
 	if certGen != nil {
 		caCert := certGen.GetCACert()
 		caKey := certGen.GetCAKey()
-		log.Printf("[GSA-MITM] certGen: caCert=%v caKey=%v", caCert != nil, caKey != nil)
+		log.Printf("[GAS-MITM] certGen: caCert=%v caKey=%v", caCert != nil, caKey != nil)
 
 		if caCert != nil && caKey != nil {
-			log.Printf("[GSA-MITM] Nova CA CN: %s", caCert.Subject.CommonName)
+			log.Printf("[GAS-MITM] Nova CA CN: %s", caCert.Subject.CommonName)
 
 			if signer, ok := caKey.(crypto.Signer); ok {
-				log.Printf("[GSA-MITM] CA key type: %T - using Nova CA for GSA MITM", caKey)
+				log.Printf("[GAS-MITM] CA key type: %T - using Nova CA for GAS MITM", caKey)
 				mitm.useCA(caCert, signer)
 			} else {
-				log.Printf("[GSA-MITM] WARNING: CA key type %T does not implement crypto.Signer - GSA will use its own self-generated CA!", caKey)
-				log.Printf("[GSA-MITM] This will cause TLS handshake failures unless you also install GSA's CA certificate.")
+				log.Printf("[GAS-MITM] WARNING: CA key type %T does not implement crypto.Signer - GAS will use its own self-generated CA!", caKey)
+				log.Printf("[GAS-MITM] This will cause TLS handshake failures unless you also install GAS's CA certificate.")
 			}
 		}
 	} else {
-		log.Printf("[GSA-MITM] WARNING: certGen is nil - GSA will use its own self-generated CA!")
+		log.Printf("[GAS-MITM] WARNING: certGen is nil - GAS will use its own self-generated CA!")
 	}
 
-	log.Printf("[GSA-MITM] GSA MITM CA CN: %s", mitm.caCert.Subject.CommonName)
+	log.Printf("[GAS-MITM] GAS MITM CA CN: %s", mitm.caCert.Subject.CommonName)
 
-	return &gsaProxyServer{
+	return &gasProxyServer{
 		relay:   relay,
 		host:    host,
 		port:    cfg.ListenPort,
@@ -1307,15 +1402,15 @@ func newGSAProxyServer(cfg GSAConfig, relay *gsaRelay, certGen CertGenerator) *g
 	}
 }
 
-func (s *gsaProxyServer) start() error {
+func (s *gasProxyServer) start() error {
 	s.ctx, s.cancel = context.WithCancel(context.Background())
 
 	ln, err := net.Listen("tcp", net.JoinHostPort(s.host, strconv.Itoa(s.port)))
 	if err != nil {
-		return fmt.Errorf("gsa listen failed: %w", err)
+		return fmt.Errorf("gas listen failed: %w", err)
 	}
 	s.listener = ln
-	log.Printf("[GSA] HTTP proxy listening on %s:%d", s.host, s.port)
+	log.Printf("[GAS] HTTP proxy listening on %s:%d", s.host, s.port)
 
 	close(s.started)
 	s.wg.Add(1)
@@ -1330,13 +1425,13 @@ func (s *gsaProxyServer) start() error {
 	return nil
 }
 
-func (s *gsaProxyServer) stop() {
+func (s *gasProxyServer) stop() {
 	if s.cancel != nil {
 		s.cancel()
 	}
 }
 
-func (s *gsaProxyServer) acceptLoop(ln net.Listener, handler func(net.Conn)) {
+func (s *gasProxyServer) acceptLoop(ln net.Listener, handler func(net.Conn)) {
 	for {
 		conn, err := ln.Accept()
 		if err != nil {
@@ -1350,12 +1445,17 @@ func (s *gsaProxyServer) acceptLoop(ln net.Listener, handler func(net.Conn)) {
 		s.wg.Add(1)
 		go func() {
 			defer s.wg.Done()
+			defer func() {
+				if r := recover(); r != nil {
+					log.Printf("[GAS-PANIC] handler recovered: %v", r)
+				}
+			}()
 			handler(conn)
 		}()
 	}
 }
 
-func (s *gsaProxyServer) handleHTTP(conn net.Conn) {
+func (s *gasProxyServer) handleHTTP(conn net.Conn) {
 	defer conn.Close()
 	_ = conn.SetDeadline(time.Now().Add(120 * time.Second))
 
@@ -1399,36 +1499,36 @@ func (s *gsaProxyServer) handleHTTP(conn net.Conn) {
 		urlStr = "http://" + urlStr
 	}
 
-	// Check if destination should bypass GSA relay (e.g. Google sensitive services)
-	if host := gsaExtractHost(urlStr); gsaShouldDirectConnect(host) {
-		gsaTraceHost(host, urlStr, method)
+	// Check if destination should bypass GAS relay (e.g. Google sensitive services)
+	if host := gasExtractHost(urlStr); gasShouldDirectConnect(host) {
+		gasTraceHost(host, urlStr, method)
 		_ = conn.SetDeadline(time.Time{})
 		s.relayRawTCP(host, 80, conn)
 		return
 	}
 
-	headerMap := gsaParseHeaders(headers[1:])
-	body := gsaReadBody(reader, headers)
+	headerMap := gasParseHeaders(headers[1:])
+	body := gasReadBody(reader, headers)
 
 	origin := headerValue(headerMap, "origin")
 	acrMethod := headerValue(headerMap, "access-control-request-method")
 	acrHeaders := headerValue(headerMap, "access-control-request-headers")
 	if method == "OPTIONS" && acrMethod != "" {
-		_, _ = conn.Write(gsaCORSPreflight(origin, acrMethod, acrHeaders))
+		_, _ = conn.Write(gasCORSPreflight(origin, acrMethod, acrHeaders))
 		return
 	}
 
-	gsaTraceHost(gsaExtractHost(urlStr), urlStr, method)
+	gasTraceHost(gasExtractHost(urlStr), urlStr, method)
 
 	response := s.relay.relayRequest(method, urlStr, headerMap, body)
 	if origin != "" {
-		response = gsaInjectCORS(response, origin)
+		response = gasInjectCORS(response, origin)
 	}
 	_, _ = conn.Write(response)
 }
 
-// gsaExtractHost extracts the hostname from a URL string.
-func gsaExtractHost(urlStr string) string {
+// gasExtractHost extracts the hostname from a URL string.
+func gasExtractHost(urlStr string) string {
 	if strings.Contains(urlStr, "://") {
 		parsed, err := url.Parse(urlStr)
 		if err == nil {
@@ -1438,18 +1538,18 @@ func gsaExtractHost(urlStr string) string {
 	return strings.ToLower(strings.Split(urlStr, ":")[0])
 }
 
-// gsaShouldDirectConnect returns true if the host should bypass GSA relay
+// gasShouldDirectConnect returns true if the host should bypass GAS relay
 // and connect directly (e.g. sensitive Google services like Gmail, Drive, Gemini).
-func gsaShouldDirectConnect(host string) bool {
+func gasShouldDirectConnect(host string) bool {
 	if host == "" {
 		return false
 	}
 	host = strings.ToLower(strings.TrimSuffix(host, "."))
 
-	if _, ok := gsaGoogleDirectExactExclude[host]; ok {
+	if _, ok := gasGoogleDirectExactExclude[host]; ok {
 		return true
 	}
-	for _, suffix := range gsaGoogleDirectSuffixExclude {
+	for _, suffix := range gasGoogleDirectSuffixExclude {
 		if strings.HasSuffix(host, suffix) {
 			return true
 		}
@@ -1457,14 +1557,14 @@ func gsaShouldDirectConnect(host string) bool {
 	return false
 }
 
-// gsaNeedsSNIRewrite returns true if the host's SNI should be rewritten
+// gasNeedsSNIRewrite returns true if the host's SNI should be rewritten
 // (e.g. YouTube, DoubleClick, Google Analytics).
-func gsaNeedsSNIRewrite(host string) bool {
+func gasNeedsSNIRewrite(host string) bool {
 	if host == "" {
 		return false
 	}
 	host = strings.ToLower(strings.TrimSuffix(host, "."))
-	for _, suffix := range gsaSNIRewriteSuffixes {
+	for _, suffix := range gasSNIRewriteSuffixes {
 		if strings.HasSuffix(host, suffix) || host == suffix {
 			return true
 		}
@@ -1472,21 +1572,21 @@ func gsaNeedsSNIRewrite(host string) bool {
 	return false
 }
 
-func gsaTraceHost(host, urlStr, method string) {
-	for _, suffix := range gsaTraceHostSuffixes {
+func gasTraceHost(host, urlStr, method string) {
+	for _, suffix := range gasTraceHostSuffixes {
 		if strings.Contains(host, suffix) {
-			log.Printf("[GSA-TRACE] %s %s (host=%s)", method, urlStr, host)
+			log.Printf("[GAS-TRACE] %s %s (host=%s)", method, urlStr, host)
 			return
 		}
 	}
 }
 
-func (s *gsaProxyServer) handleCONNECT(conn net.Conn, reader *bufio.Reader, target string) {
-	host, port := gsaSplitHostPort(target, 443)
-	gsaTraceHost(host, target, "CONNECT")
+func (s *gasProxyServer) handleCONNECT(conn net.Conn, reader *bufio.Reader, target string) {
+	host, port := gasSplitHostPort(target, 443)
+	gasTraceHost(host, target, "CONNECT")
 
 	// Direct connect for excluded Google services
-	if gsaShouldDirectConnect(host) {
+	if gasShouldDirectConnect(host) {
 		_, _ = conn.Write([]byte("HTTP/1.1 200 Connection Established\r\n\r\n"))
 		_ = conn.SetDeadline(time.Time{})
 		s.relayRawTCP(host, port, conn)
@@ -1497,16 +1597,16 @@ func (s *gsaProxyServer) handleCONNECT(conn net.Conn, reader *bufio.Reader, targ
 		t0 := time.Now()
 		tlsCert, err := s.mitm.getCert(host)
 		if err != nil {
-			log.Printf("[GSA] getCert failed for %s: %v", host, err)
+			log.Printf("[GAS] getCert failed for %s: %v", host, err)
 			_, _ = conn.Write([]byte("HTTP/1.1 502 Bad Gateway\r\n\r\n"))
 			return
 		}
 		dCert := time.Since(t0)
 
 		sni := host
-		if gsaNeedsSNIRewrite(host) {
+		if gasNeedsSNIRewrite(host) {
 			sni = s.relay.sniHost
-			log.Printf("[GSA] SNI rewrite for %s -> %s", host, sni)
+			log.Printf("[GAS] SNI rewrite for %s -> %s", host, sni)
 		}
 
 		tlsCfg := &tls.Config{
@@ -1517,25 +1617,25 @@ func (s *gsaProxyServer) handleCONNECT(conn net.Conn, reader *bufio.Reader, targ
 		t1 := time.Now()
 		tlsConn := tls.Server(conn, tlsCfg)
 		if err := tlsConn.Handshake(); err != nil {
-			log.Printf("[GSA] TLS handshake failed for %s: %v (getCert=%v) - falling back to raw TCP", host, err, dCert)
+			log.Printf("[GAS] TLS handshake failed for %s: %v (getCert=%v) - falling back to raw TCP", host, err, dCert)
 			_ = conn.SetDeadline(time.Time{})
 			s.relayRawTCP(host, port, conn)
 			return
 		}
-		log.Printf("[GSA] CONNECT %s (getCert=%v, TLS=%v)", host, dCert, time.Since(t1))
+		log.Printf("[GAS] CONNECT %s (getCert=%v, TLS=%v)", host, dCert, time.Since(t1))
 		s.relayHTTPOverTLS(host, port, tlsConn)
 		return
 	}
 
 	_, _ = conn.Write([]byte("HTTP/1.1 200 Connection Established\r\n\r\n"))
 	_ = conn.SetDeadline(time.Time{})
-	s.relayHTTPOverTLS(host, port, conn)
+	s.relayRawTCP(host, port, conn)
 }
 
-func (s *gsaProxyServer) relayRawTCP(host string, port int, client net.Conn) {
+func (s *gasProxyServer) relayRawTCP(host string, port int, client net.Conn) {
 	dst, err := net.DialTimeout("tcp", net.JoinHostPort(host, strconv.Itoa(port)), 15*time.Second)
 	if err != nil {
-		log.Printf("[GSA] raw TCP dial failed for %s:%d: %v", host, port, err)
+		log.Printf("[GAS] raw TCP dial failed for %s:%d: %v", host, port, err)
 		return
 	}
 	defer dst.Close()
@@ -1545,17 +1645,17 @@ func (s *gsaProxyServer) relayRawTCP(host string, port int, client net.Conn) {
 	go func() {
 		defer wg.Done()
 		n, err := io.Copy(dst, client)
-		log.Printf("[GSA] raw TCP client->dst %s:%d: %d bytes, err=%v", host, port, n, err)
+		log.Printf("[GAS] raw TCP client->dst %s:%d: %d bytes, err=%v", host, port, n, err)
 	}()
 	go func() {
 		defer wg.Done()
 		n, err := io.Copy(client, dst)
-		log.Printf("[GSA] raw TCP dst->client %s:%d: %d bytes, err=%v", host, port, n, err)
+		log.Printf("[GAS] raw TCP dst->client %s:%d: %d bytes, err=%v", host, port, n, err)
 	}()
 	wg.Wait()
 }
 
-func (s *gsaProxyServer) relayHTTPOverTLS(host string, port int, conn net.Conn) {
+func (s *gasProxyServer) relayHTTPOverTLS(host string, port int, conn net.Conn) {
 	_ = conn.SetDeadline(time.Now().Add(120 * time.Second))
 	relayReader := bufio.NewReaderSize(conn, 4096)
 	for {
@@ -1585,27 +1685,27 @@ func (s *gsaProxyServer) relayHTTPOverTLS(host string, port int, conn net.Conn) 
 			}
 		}
 
-		method, path := gsaParseRequestLine(line)
-		body := gsaReadBody(relayReader, reqHeaders)
-		headerMap := gsaParseHeaders(reqHeaders[1:])
+		method, path := gasParseRequestLine(line)
+		body := gasReadBody(relayReader, reqHeaders)
+		headerMap := gasParseHeaders(reqHeaders[1:])
 
 		origin := headerValue(headerMap, "origin")
 		acrMethod := headerValue(headerMap, "access-control-request-method")
 		acrHeaders := headerValue(headerMap, "access-control-request-headers")
 		if strings.ToUpper(method) == "OPTIONS" && acrMethod != "" {
-			_, _ = conn.Write(gsaCORSPreflight(origin, acrMethod, acrHeaders))
+			_, _ = conn.Write(gasCORSPreflight(origin, acrMethod, acrHeaders))
 			continue
 		}
 
-		urlStr := gsaNormalizeURL(host, port, path)
+		urlStr := gasNormalizeURL(host, port, path)
 		tReq := time.Now()
 		response := s.relay.relayRequest(method, urlStr, headerMap, body)
 		dReq := time.Since(tReq)
 		if dReq > 5*time.Second {
-			log.Printf("[GSA] SLOW relay: %s %s took %v", method, urlStr, dReq)
+			log.Printf("[GAS] SLOW relay: %s %s took %v", method, urlStr, dReq)
 		}
 		if origin != "" {
-			response = gsaInjectCORS(response, origin)
+			response = gasInjectCORS(response, origin)
 		}
 		_, _ = conn.Write(response)
 	}
@@ -1613,7 +1713,7 @@ func (s *gsaProxyServer) relayHTTPOverTLS(host string, port int, conn net.Conn) 
 
 
 
-func gsaParseHeaders(lines []string) map[string]string {
+func gasParseHeaders(lines []string) map[string]string {
 	h := map[string]string{}
 	for _, ln := range lines {
 		ln = strings.TrimRight(ln, "\r\n")
@@ -1629,7 +1729,7 @@ func gsaParseHeaders(lines []string) map[string]string {
 	return h
 }
 
-func gsaReadBody(reader *bufio.Reader, headers []string) []byte {
+func gasReadBody(reader *bufio.Reader, headers []string) []byte {
 	cl := 0
 	for _, ln := range headers {
 		if strings.HasPrefix(strings.ToLower(ln), "content-length:") {
@@ -1655,7 +1755,7 @@ func gsaReadBody(reader *bufio.Reader, headers []string) []byte {
 	return buf
 }
 
-func gsaParseRequestLine(line string) (string, string) {
+func gasParseRequestLine(line string) (string, string) {
 	parts := strings.Split(strings.TrimSpace(line), " ")
 	if len(parts) < 2 {
 		return "GET", "/"
@@ -1663,7 +1763,7 @@ func gsaParseRequestLine(line string) (string, string) {
 	return parts[0], parts[1]
 }
 
-func gsaNormalizeURL(host string, port int, path string) string {
+func gasNormalizeURL(host string, port int, path string) string {
 	if strings.HasPrefix(path, "http://") || strings.HasPrefix(path, "https://") {
 		return path
 	}
@@ -1677,7 +1777,7 @@ func gsaNormalizeURL(host string, port int, path string) string {
 	return fmt.Sprintf("%s://%s:%d%s", scheme, host, port, path)
 }
 
-func gsaSplitHostPort(target string, defPort int) (string, int) {
+func gasSplitHostPort(target string, defPort int) (string, int) {
 	if strings.Contains(target, ":") {
 		parts := strings.Split(target, ":")
 		if len(parts) >= 2 {

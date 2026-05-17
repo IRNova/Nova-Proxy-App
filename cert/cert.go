@@ -125,6 +125,9 @@ func (cm *CertManager) LoadCA() error {
 	}
 
 	block, _ := pem.Decode(caData)
+	if block == nil {
+		return fmt.Errorf("failed to decode CA certificate PEM from %s", cm.caPath)
+	}
 	cert, err := x509.ParseCertificate(block.Bytes)
 	if err != nil {
 		return err
@@ -136,6 +139,9 @@ func (cm *CertManager) LoadCA() error {
 	}
 
 	keyBlock, _ := pem.Decode(keyData)
+	if keyBlock == nil {
+		return fmt.Errorf("failed to decode CA key PEM from %s", cm.keyPath)
+	}
 	key, err := x509.ParsePKCS1PrivateKey(keyBlock.Bytes)
 	if err != nil {
 		return err
@@ -157,12 +163,6 @@ func (cm *CertManager) GetCertPool() *x509.CertPool {
 		pool.AddCert(cm.caCert)
 	}
 	return pool
-}
-
-func (cm *CertManager) GetCA() *x509.Certificate {
-	cm.certMu.RLock()
-	defer cm.certMu.RUnlock()
-	return cm.caCert
 }
 
 func (cm *CertManager) GetCACert() *x509.Certificate {
@@ -190,13 +190,14 @@ type CAInstallStatus struct {
 }
 
 func (cm *CertManager) GetCAInstallStatus() CAInstallStatus {
-	cm.certMu.Lock()
+	cm.certMu.RLock()
 	if !cm.lastCheck.IsZero() && time.Since(cm.lastCheck) < 5*time.Minute {
 		status := cm.lastStatus
-		cm.certMu.Unlock()
+		cm.certMu.RUnlock()
 		return status
 	}
-	cm.certMu.Unlock()
+	cachedCA := cm.caCert
+	cm.certMu.RUnlock()
 
 	platformHelp := map[string]string{
 		"windows": "Install in Windows Trusted Root store via Settings > Security or run InstallCA",
@@ -213,12 +214,16 @@ func (cm *CertManager) GetCAInstallStatus() CAInstallStatus {
 		status.InstallHelp = "Manually install the CA certificate in your system trust store"
 	}
 
-	if cm.caCert == nil {
+	ca := cachedCA
+	if ca == nil {
 		if err := cm.LoadCA(); err != nil {
 			return status
 		}
+		cm.certMu.RLock()
+		ca = cm.caCert
+		cm.certMu.RUnlock()
 	}
-	if cm.caCert == nil {
+	if ca == nil {
 		return status
 	}
 
@@ -227,7 +232,7 @@ func (cm *CertManager) GetCAInstallStatus() CAInstallStatus {
 
 	// Fallback: Windows-only PowerShell check
 	if !status.Installed && runtime.GOOS == "windows" {
-		sum := sha1.Sum(cm.caCert.Raw)
+		sum := sha1.Sum(ca.Raw)
 		thumb := strings.ToUpper(hex.EncodeToString(sum[:]))
 
 		psScript := fmt.Sprintf(`
@@ -286,13 +291,19 @@ func (cm *CertManager) InstallCA() error {
 
 	// Fallback to Windows-only certutil for backward compatibility
 	if runtime.GOOS == "windows" {
-		err := runHiddenCommand("certutil", "-user", "-addstore", "root", cm.caPath)
-		if err != nil {
-			return fmt.Errorf("failed to install CA certificate: %w", err)
+		userErr := runHiddenCommand("certutil", "-user", "-addstore", "root", cm.caPath)
+		if userErr != nil {
+			return fmt.Errorf("failed to install CA certificate to CurrentUser: %w", userErr)
+		}
+		fmt.Println("[Cert] CA certificate installed to CurrentUser Root store (certutil fallback)")
+
+		if lmErr := runHiddenCommand("certutil", "-addstore", "root", cm.caPath); lmErr != nil {
+			fmt.Printf("[Cert] LocalMachine install skipped (not admin?): %v\n", lmErr)
+		} else {
+			fmt.Println("[Cert] CA certificate installed to LocalMachine Root store (certutil fallback)")
 		}
 
 		cm.invalidateInstallStatusCache()
-		fmt.Println("[Cert] CA certificate installed successfully to CurrentUser Root store (certutil fallback)")
 		return nil
 	}
 
@@ -544,7 +555,9 @@ func InitCertManager(certDir string) (*CertManager, error) {
 }
 
 func InitCertManagerWithFallback(certDir, fallbackCADir string) (*CertManager, error) {
-	os.MkdirAll(certDir, 0755)
+	if err := os.MkdirAll(certDir, 0755); err != nil {
+		return nil, fmt.Errorf("failed to create cert dir %s: %w", certDir, err)
+	}
 
 	targetCACert := filepath.Join(certDir, "ca.crt")
 	targetCAKey := filepath.Join(certDir, "ca.key")
@@ -565,9 +578,9 @@ func InitCertManagerWithFallback(certDir, fallbackCADir string) (*CertManager, e
 				targetCN := getCertCN(targetCACert)
 
 				if fallbackCN != "" && targetCN != "" && fallbackCN != targetCN {
-					if strings.Contains(strings.ToLower(fallbackCN), "mhr-gsa") {
+					if strings.Contains(strings.ToLower(fallbackCN), "mhr-gas") {
 						shouldCopy = true
-						reason = fmt.Sprintf("fallback CA (%s) is mhr-gsa which differs from existing CA (%s)", fallbackCN, targetCN)
+						reason = fmt.Sprintf("fallback CA (%s) is mhr-gas which differs from existing CA (%s)", fallbackCN, targetCN)
 					}
 				}
 			}
