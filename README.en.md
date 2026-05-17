@@ -5,6 +5,10 @@
   <p>Bypass Smart Filtering with Domain Fronting based on Google Apps Script and Cloudflare Worker</p>
 </div>
 
+<p align="center">
+  <a href="https://github.com/IRNova/Nova-Proxy-App/blob/main/README.md">🇮🇷 نسخه فارسی</a>
+</p>
+
 ---
 
 <a name="en"></a>
@@ -358,6 +362,12 @@ This software is provided for educational, research, and testing purposes only.
   <h3>Support the Project</h3>
   <p>Support us with a donation here</p>
   <p><a href="https://daramet.com/NovaPr" target="_blank">🔗 https://daramet.com/NovaPr</a></p>
+  <hr>
+  <h4>Wallet Addresses</h4>
+  <p><strong>BTC:</strong></p>
+  <pre><code>bc1qc54su3gz20ulq8df7k0pcskk4zz4sy0e7z7hws</code></pre>
+  <p><strong>TON:</strong></p>
+  <pre><code>UQD51lGC35rP_SbVYgbFA7CEEii4GVMFgqj4N8fiGi6m425w</code></pre>
 </div>
 
 ---
