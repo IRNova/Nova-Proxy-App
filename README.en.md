@@ -357,7 +357,11 @@ This software is provided for educational, research, and testing purposes only.
 <div align="center">
   <h3>Support the Project</h3>
   <p>Support us with a donation here</p>
+<<<<<<< HEAD
   <p><a href="https://daramet.com/NovaPr" target="_blank">🔗 https://daramet.com/NovaPr</a></p>
+=======
+  <p><a href="https://daramet.com/NovaProxy" target="_blank">🔗 https://daramet.com/NovaPr</a></p>
+>>>>>>> 66351fa6fbbed1e4fb20eb6010619b68ac77953e
 </div>
 
 ---
