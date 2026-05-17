@@ -1,0 +1,367 @@
+<div align="center">
+  <img src="https://raw.githubusercontent.com/IRNova/Nova-Proxy-App/main/logo.svg" width="120" height="120" alt="NovaProxy Logo">
+  <h1>NovaProxy</h1>
+  <p><strong>Cloudflare IP Shaper — Domain Fronting Proxy with MITM + GSA Relay Engines</strong></p>
+  <p>Bypass Smart Filtering with Domain Fronting based on Google Apps Script and Cloudflare Worker</p>
+</div>
+
+---
+
+<a name="en"></a>
+
+## Introduction
+
+NovaProxy is a desktop proxy (Wails v3 / Go) that routes internet traffic through Google and Cloudflare infrastructure. From the DPI's perspective, all traffic looks like normal communication with `www.google.com`, while actual requests are sent to any target site.
+
+Two main cores:
+
+| Core | Function |
+|------|----------|
+| **MITM Engine** | TLS termination, dynamic certificate generation, SNI spoofing, fragmentation |
+| **GSA Relay** | Relay traffic through Google Apps Script → Cloudflare Worker with H2 multiplexing |
+
+---
+
+## MITM Engine
+
+The MITM Engine handles **TLS termination and re-encryption**, making HTTPS traffic inspectable and routable.
+
+```
+Client → CONNECT tunnel → TLS Termination (MITM Cert) → Upstream TLS (SNI spoofed) → Target
+                            │
+                     Dynamic Cert Generation
+                     (ECDSA P256 signed by Root CA)
+```
+
+### MITM Architecture
+
+```
+ProxyServer.handleConnect()
+    │
+    ├── direct        → Raw TCP tunnel
+    ├── transparent   → Forward TLS bytes without termination
+    ├── tls-rf        → Fragment ClientHello + tunnel
+    ├── quic          → MITM over QUIC/HTTP3
+    └── mitm          ──► handleMITM()
+                            │
+                    ┌───────▼────────┐
+                    │  establishUpstreamConn()
+                    │  - resolve candidates
+                    │  - uTLS handshake (fingerprint randomization)
+                    │  - ALPN negotiation (h2 / http/1.1)
+                    │  - ECH support
+                    └───────┬────────┘
+                            │
+                    ┌───────▼────────┐
+                    │  makeMITMTLSConfig()
+                    │  - generateCert(host, CA cert, CA key)
+                    │  - ECDSA P256 per-host cert
+                    │  - cache certs in memory
+                    │  - serve to client via tls.Server()
+                    └───────┬────────┘
+                            │
+                    ┌───────▼────────┐
+                    │  directTunnel()
+                    │  - bidirectional copy (pooled buffers)
+                    │  - client ↔ upstream
+                    └────────────────┘
+```
+
+### MITM Capabilities
+
+| Feature | Description |
+|---------|-------------|
+| **Dynamic Certificate Generation** | Generate ECDSA P256 certificate per domain on-the-fly, signed by Root CA (RSA 2048) |
+| **Root CA Management** | Create, install, and manage CA on Windows / macOS / Linux / Firefox |
+| **TLS Termination** | Terminate client TLS, reconnect to target with spoofed SNI |
+| **SNI Spoofing** | Replace real SNI with front domain (e.g. `www.google.com`) |
+| **uTLS Fingerprint** | Mimic Chrome or Firefox TLS fingerprint via `refraction-networking/utls` |
+| **TLS Fragmentation** | Fragment ClientHello into multiple segments with configurable delay to bypass DPI |
+| **QUIC/HTTP3 MITM** | MITM support over QUIC via `quic-go` |
+| **ECH (Encrypted ClientHello)** | ECH support to hide SNI |
+| **Advanced Certificate Verification** | `allow_names` whitelist modes, Custom CA pinning |
+
+### MITM Files
+
+```
+cert/
+├── cert.go           # CA generation, loading, PEM output, regeneration
+├── installer.go      # Install/remove/check CA on OS
+└── exec_windows.go   # Execute commands on Windows (hidden/elevated)
+
+proxy/
+├── proxy.go          # MITM handler, CONNECT tunnel, TLS config
+├── tls_fragment.go   # Fragmentation for DPI bypass
+├── cert_verify.go    # Advanced certificate verification
+└── cf_pool.go        # Cloudflare IP pool
+```
+
+---
+
+## GSA Relay Engine
+
+The GSA Relay routes traffic through **Google infrastructure** using the Domain Fronting technique. From the DPI's perspective, all traffic appears to be destined for `www.google.com`.
+
+```
+Browser
+    │
+    ▼
+GSA Proxy (127.0.0.1:8085)
+    │  ← TLS Termination (MITM cert)
+    ▼
+H2 Connection → Google IP (SNI: www.google.com)
+    │  ← From DPI perspective: normal Google traffic
+    ▼
+Google Apps Script (script.google.com)
+    │  ← JSON relay inside Google infrastructure
+    ▼
+Cloudflare Worker
+    │  ← Exit with Cloudflare IP
+    ▼
+Site Target
+```
+
+### GSA Architecture
+
+```
+gsaProxyServer.start()
+    │
+    ├── acceptLoop() → handleHTTP(conn)
+    │       │
+    │       ├── CONNECT → handleCONNECT()
+    │       │       ├── gsaShouldDirectConnect() → relayRawTCP()
+    │       │       └── TLS: mitm.getCert() → TLS Server → relayHTTPOverTLS()
+    │       │
+    │       ├── OPTIONS + access-control-request → CORS Preflight
+    │       │
+    │       └── GET/POST → relayRequest()
+    │               │
+    │               ▼
+    │          gsaRelay
+    │               │
+    │               ├── isStatefulRequest()? → relaySingle() (no cache/batch)
+    │               │
+    │               ├── GET (no range, no stateful) → tryCoalesce()
+    │               │       └── waiters share one response
+    │               │
+    │               ├── batching: batchSubmit() → flushBatch()
+    │               │       └── 5ms window, max 50 items
+    │               │
+    │               ├── cache: cache.get() / cache.put()
+    │               │       └── LRU 50MB, TTL: 1h/30min/max-age
+    │               │
+    │               └── Transport Layer
+    │                       ├── H2 Client (HTTP/2 multiplexed)
+    │                       │   └── TLS → Google IP (SNI pool rotation)
+    │                       │
+    │                       └── H1.1 Pool (fallback)
+    │                           └── Conn pool (max 50, TTL 45s)
+    │
+    │
+    ├── GSAManager (lifecycle management)
+    │       ├── Start/Stop
+    │       ├── Auto-Failover (error monitoring, new IP scan)
+    │       ├── SNI Rotation (automatic front domain rotation)
+    │       ├── Heartbeat (ping every 30s)
+    │       ├── Google IP Scanner (26 static IPs + DNS)
+    │       ├── Speed Test (real download)
+    │       └── Connection Test (TCP+TLS)
+    │
+    └── Server Side
+            ├── Google Apps Script (Code.gs)
+            │       ├── doPost() → receive JSON → UrlFetchApp → Worker
+            │       ├── doGet() → status page
+            │       └── Batch: doBatch() → UrlFetchApp.fetchAll()
+            │
+            └── Cloudflare Worker (worker.js)
+                    ├── POST → fetch() to target
+                    ├── GET → status page
+                    └── Upstream Forwarder (optional)
+```
+
+### GSA Capabilities
+
+| Feature | Description |
+|---------|-------------|
+| **Domain Fronting** | Connect to Google IPs with SNI=google, actual Host=script.google.com |
+| **H2 Multiplexing** | Single persistent H2 connection for all requests |
+| **Connection Pooling** | 50-connection TLS pool with 45s TTL, H1.1 fallback |
+| **Request Batching** | Aggregate requests in 5ms window (max 50), send as batch |
+| **Request Coalescing** | Identical GET requests share a single response |
+| **Response Caching** | LRU cache up to 50MB, smart TTL (1h static, 30min CSS/JS) |
+| **SNI Rotation** | Automatic SNI rotation across `www.google.com`, `mail.google.com`, `accounts.google.com` |
+| **Auto-Failover** | Detect consecutive errors → automatic new IP scan → switch |
+| **Google IP Scanner** | Probe 26 static IPs + DNS IPs with 8-way concurrency |
+| **Smart Routing** | Sensitive Google services (Gmail, Drive, Meet) connect directly |
+| **SNI Rewrite** | YouTube and DoubleClick SNI auto-rewritten |
+| **CORS** | OPTIONS handler + CORS header injection |
+| **Content Decoding** | Auto-decode gzip, deflate, brotli, zstd |
+| **LAN Sharing** | LAN IP detection and proxy sharing |
+| **Split Tunnel** | Route by application name (allowlist) |
+| **Speed Test** | Real download speed measurement through tunnel |
+
+### GSA Files
+
+```
+proxy/
+├── gsa.go             # GSAManager: config, start/stop, status, IP scan, speed test
+├── gsa_relay.go       # gsaRelay: H2/H1.1 transport, batching, caching, coalescing
+├── gsa_lan.go         # LAN IP detection
+├── gsa_constants.go   # Google IPs, routing table, SNI rewrite list
+└── config.go          # GSAConfig model
+
+server/
+├── Code.gs            # Google Apps Script
+└── worker.js          # Cloudflare Worker
+```
+
+---
+
+## Server Setup
+
+### 1. Cloudflare Worker
+
+1. Go to [dash.cloudflare.com](https://dash.cloudflare.com)
+2. Left menu → **Compute (Workers)** → **Workers & Pages**
+3. Click **Create** → **Start with Hello World**
+4. Name your worker (e.g. `my-nova-relay`)
+5. Click **Deploy**, then **Edit code**
+6. Copy all contents of `server/worker.js` and replace
+7. Find this line:
+```js
+const WORKER_URL = "Your-Cloudflare-worker-address";
+```
+8. Replace with your actual worker address:
+```js
+const WORKER_URL = "my-nova-relay.yourname.workers.dev";
+```
+9. Click **Deploy** and note your worker URL
+
+### 2. Google Apps Script
+
+1. Go to [script.google.com](https://script.google.com)
+2. **New project**
+3. Copy all contents of `server/Code.gs` and replace
+4. Find these two lines:
+```js
+const AUTH_KEY = "Novaproxy";
+const WORKER_URL = "https://my-nova-relay.yourname.workers.dev";
+```
+5. Change:
+   - `AUTH_KEY` ← a strong custom password (e.g. `mY$tr0nGK3y2024x`)
+   - `WORKER_URL` ← your worker URL from the previous step
+6. **Ctrl+S** to save
+7. Top menu → **Deploy** → **New deployment**
+8. ⚙️ → Select **Web app**
+9. Settings:
+   - **Execute as**: `Me`
+   - **Who has access**: `Anyone`
+10. Click **Deploy**
+11. If prompted for access:
+    - **Authorize access**
+    - Select your Google account
+    - **Advanced** → **Go to [project name] (unsafe)** → **Allow**
+12. Copy the **Deployment ID** (looks like `AKfycbz...`)
+
+### 3. Usage Tutorial
+
+#### Step 1 — Initial Setup
+
+1. Double-click `novaproxy.exe` to launch.
+2. The welcome screen appears. A **popup** for certificate installation will show — install it.
+3. After installing the certificate:
+   - Set **Country** to **Iran**.
+   - Choose your preferred **Language** and **Theme**.
+   - Click **Start**.
+
+#### Without GSA — MITM Only
+
+If you just click Start without activating the **Google Apps Script** feature:
+- Proxy and system proxy will be enabled.
+- Rules from the **Rules** section will be loaded.
+- Sites in the MITM whitelist (e.g. all Google subdomains, YouTube, etc.) will open.
+- **Note:** YouTube videos won't play because video servers are outside Google's domains.
+
+#### Activating GSA
+
+To use the **Google Apps Script** feature:
+
+1. Go to the **Proxy** page.
+2. In the GSA section, edit the default values and enter your new data (Auth Key, Script ID, Worker URL).
+3. Click **Save**.
+4. Go to the **Routing** page and set routing to **Auto GSA**.
+   - The system will automatically select the best IP for you.
+5. Go to **GSA Settings** and click **Scan IP** to find the best IPs.
+
+#### Using GSA
+
+Go to the **Dashboard** and follow these steps in order:
+
+1. Enable **Proxy**.
+2. Enable **System Proxy**.
+3. Enable **GSA Toggle**.
+
+Now you can browse any site — even **Telegram Web** works perfectly.
+
+> **Note:** Desktop apps like Telegram for Windows currently cannot use GSA directly from the OS, but all sites work fine in the browser.
+
+---
+
+## Prerequisites
+
+- Google account (for Apps Script)
+- Cloudflare account (for Worker)
+
+---
+
+## Acknowledgments
+
+The **GSA** section of this project is based on the initial version of [mhr-cfw-go](https://github.com/denuitt1/mhr-cfw-go). This project was used as a starting point for the Google Apps Script relay core, but has since been significantly upgraded with many new features.
+
+Thanks to [denuitt1](https://github.com/denuitt1) for providing this project.
+
+The frontend (UI) of this project is taken from the [SniShaper](https://github.com/SniShaper/SniShaper) project. Note that **SniShaper** is designed to bypass China's internet restrictions, and the MITM and GSA cores of Nova have no codebase relationship or dependency on that project. NovaProxy is specifically developed to bypass internet restrictions in Iran.
+
+Thanks to [SniShaper](https://github.com/SniShaper) for providing this frontend.
+
+### SniShaper vs NovaProxy Comparison
+
+| Metric | SniShaper | Nova-Proxy-App |
+|--------|-----------|----------------|
+| **Language** | Go 87%, TypeScript | Go, TypeScript (Wails v3) |
+| **TUN Mode** | No | Yes |
+| **Google Apps Script** | No | Yes (GSA Relay) |
+| **Main Bypass Technique** | ClientHello manipulation | MITM + Domain Fronting (GSA) |
+
+### Key Differences (What Makes Nova Unique)
+
+Nova is not just a simple copy — it has advanced features not found in SniShaper:
+
+- **GSA Engine (Google Apps Script):** The most important difference — relays traffic through Google's servers. SniShaper does not have this capability.
+- **Custom Optimization:** Nova is specifically optimized for bypassing Iran's internet restrictions, with Cloudflare IP Pool and WARP Masque support.
+- **TUN Mode:** Nova's TUN mode allows managing all OS traffic without manual configuration, unlike SniShaper.
+
+---
+
+## Disclaimer
+
+This software is provided for educational, research, and testing purposes only.
+
+- The software is provided "AS IS" without any warranty
+- The developers are not liable for any damages
+- Compliance with local, national, and international laws is the user's responsibility
+- Compliance with Google and Cloudflare terms of service is the user's responsibility
+
+---
+
+<div align="center">
+  <h3>Support the Project</h3>
+  <p>Support us with a donation here</p>
+  <p><a href="https://daramet.com/NovaPr" target="_blank">🔗 https://daramet.com/NovaPr</a></p>
+</div>
+
+---
+
+## Stargazers over time
+
+[![Stargazers over time](https://starchart.cc/IRNova/Nova-Proxy-App.svg?variant=adaptive)](https://starchart.cc/IRNova/Nova-Proxy-App)
