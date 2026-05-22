@@ -34,6 +34,7 @@ type coreRuntime struct {
 	proxyServer       *proxy.ProxyServer
 	externalTUN       *externalMihomoManager
 	certManager       *cert.CertManager
+	v2rayManager      *proxy.V2RayManager
 	logBuffer         *ringLogWriter
 	logCaptureMu      sync.RWMutex
 	logCaptureEnabled bool
@@ -65,14 +66,15 @@ func newCoreRuntime() (*coreRuntime, error) {
 	}
 
 	r := &coreRuntime{
-		execPath:    execPath,
-		execDir:     execDir,
-		certPath:    filepath.Join(execDir, "data", "cert"),
-		ruleManager: ruleManager,
-		proxyServer: proxy.NewProxyServer("127.0.0.1:" + port),
-		externalTUN: newExternalMihomoManager(),
-		logBuffer:   newRingLogWriter(5000),
+		execPath:     execPath,
+		execDir:      execDir,
+		certPath:     filepath.Join(execDir, "data", "cert"),
+		ruleManager:  ruleManager,
+		proxyServer:  proxy.NewProxyServer("127.0.0.1:" + port),
+		externalTUN:  newExternalMihomoManager(),
+		logBuffer:    newRingLogWriter(5000),
 	}
+	r.v2rayManager = proxy.NewV2RayManager(filepath.Join(execDir, "data", "Xray"), r.appendLog)
 
 	if err := r.proxyServer.SetSOCKSAddr(ruleManager.GetSocksAddr()); err != nil {
 		r.appendLog("[warn] Failed to set SOCKS5 address: " + err.Error())
@@ -85,7 +87,6 @@ func newCoreRuntime() (*coreRuntime, error) {
 }
 
 func (r *coreRuntime) start() error {
-	writeCoreMarker(r.execDir, "core_runtime_start", "begin")
 	r.setupLogger()
 	var err error
 	r.certManager, err = cert.InitCertManager(r.certPath)
@@ -108,7 +109,6 @@ func (r *coreRuntime) start() error {
 	})
 
 	r.appendLog("[core] runtime ready")
-	writeCoreMarker(r.execDir, "core_runtime_start", "ready")
 	return nil
 }
 
@@ -252,8 +252,68 @@ func (r *coreRuntime) startProxy() error {
 		_ = r.proxyServer.Stop()
 		return fmt.Errorf("proxy started but not listening on %s: %w", addr, err)
 	}
+
+	// Set V2Ray ports on proxy server for routing
+	r.proxyServer.SetV2RayPort(r.v2rayManager.GetCorePort())
+	r.proxyServer.SetV2RayHTTPPort(r.v2rayManager.GetCorePort() + 1)
+
 	r.appendLog("[core] proxy started")
 	return nil
+}
+
+// switchMode changes the runtime routing mode for the proxy.
+// Supported modes: "rule" (use manual rules), "gas" (all through GAS), "v2ray" (all through V2Ray core)
+func (r *coreRuntime) switchMode(mode string) error {
+	mode = strings.ToLower(strings.TrimSpace(mode))
+	r.appendLog(fmt.Sprintf("[core] switchMode: %s", mode))
+
+	switch mode {
+	case "rule":
+		// Use manual rules from rules page - set ProxyServer mode to mitm/transparent
+		r.proxyServer.SetMode("mitm")
+
+	case "gas":
+		// All traffic through GAS
+		r.proxyServer.SetMode("gas")
+		r.appendLog("[core] Routing mode set to gas — all traffic through GAS")
+
+	case "v2ray":
+		// All traffic through V2Ray core
+		r.proxyServer.SetMode("v2ray")
+		// Ensure V2Ray ports are set
+		r.proxyServer.SetV2RayPort(r.v2rayManager.GetCorePort())
+		r.proxyServer.SetV2RayHTTPPort(r.v2rayManager.GetCorePort() + 1)
+		r.appendLog(fmt.Sprintf("[core] Routing mode set to v2ray — all traffic through V2Ray core on port %d", r.v2rayManager.GetCorePort()))
+
+	default:
+		return fmt.Errorf("unknown routing mode: %s", mode)
+	}
+
+	// Save the routing mode to V2Ray settings
+	settings := r.v2rayManager.GetSettings()
+	settings.RoutingMode = mode
+	r.v2rayManager.SaveSettings(settings)
+
+	r.appendLog(fmt.Sprintf("[core] routing mode set to: %s", mode))
+	return nil
+}
+
+// getCurrentMode returns the current routing mode
+func (r *coreRuntime) getCurrentMode() string {
+	settings := r.v2rayManager.GetSettings()
+	if settings.RoutingMode != "" {
+		return settings.RoutingMode
+	}
+	// Fallback: infer from proxy server mode
+	proxyMode := r.proxyServer.GetMode()
+	switch proxyMode {
+	case "gas":
+		return "gas"
+	case "v2ray":
+		return "v2ray"
+	default:
+		return "rule"
+	}
 }
 
 func (r *coreRuntime) stopProxy() error {
@@ -271,48 +331,33 @@ func (r *coreRuntime) stopProxy() error {
 }
 
 func (r *coreRuntime) startTUN() (err error) {
-	writeCoreMarker(r.execDir, "start_tun", "entered")
 	r.setTUNStartState(true, nil)
 	defer func() {
-		if err != nil {
-			writeCoreMarker(r.execDir, "start_tun", markerDetail("leaving with error: %v", err))
-		} else {
-			writeCoreMarker(r.execDir, "start_tun", "leaving without error")
-		}
 		r.setTUNStartState(false, err)
 	}()
 
 	if !isProcessElevated() {
 		err = fmt.Errorf("TUN requires administrator privileges on Windows; please restart NovaProxy as administrator")
-		writeCoreMarker(r.execDir, "start_tun", "not elevated")
 		return err
 	}
 	if !r.proxyServer.IsRunning() {
 		r.appendLog("[core] proxy not running, starting proxy before TUN")
-		writeCoreMarker(r.execDir, "start_tun", "before startProxy")
 		if err = r.startProxy(); err != nil {
-			writeCoreMarker(r.execDir, "start_tun", markerDetail("startProxy failed: %v", err))
 			return fmt.Errorf("start proxy before TUN: %w", err)
 		}
-		writeCoreMarker(r.execDir, "start_tun", "after startProxy")
 	}
 	if r.externalTUN == nil {
 		err = fmt.Errorf("external mihomo manager is not initialized")
-		writeCoreMarker(r.execDir, "start_tun", "external manager missing")
 		return err
 	}
 	listenPort := r.currentListenPort()
 	if listenPort == "" {
 		err = fmt.Errorf("proxy listen port is empty")
-		writeCoreMarker(r.execDir, "start_tun", "empty listen port")
 		return err
 	}
-	writeCoreMarker(r.execDir, "start_tun", "before externalTUN.Start")
 	if err = r.externalTUN.Start(r.ruleManager.GetTUNConfig(), listenPort, r.appendLog); err != nil {
-		writeCoreMarker(r.execDir, "start_tun", markerDetail("externalTUN.Start failed: %v", err))
 		return err
 	}
-	writeCoreMarker(r.execDir, "start_tun", "after externalTUN.Start")
 	r.appendLog("[core] external mihomo tun started")
 	return nil
 }

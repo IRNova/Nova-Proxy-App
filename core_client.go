@@ -286,6 +286,103 @@ func (c *coreClient) SetGASDialAddr(addr string) error {
 	return c.call("Core.SetGASDialAddr", SetGASDialAddrArgs{Addr: addr}, &empty)
 }
 
+func (c *coreClient) SetGASRelay(cfg proxy.GASConfig) error {
+	var empty EmptyArgs
+	args := SetGASRelayArgs{
+		Enabled:     cfg.Running || (cfg.AuthKey != "" && cfg.AuthKey != "changeme" && cfg.GoogleIP != ""),
+		GoogleIP:    cfg.GoogleIP,
+		FrontDomain: cfg.FrontDomain,
+		ScriptID:    cfg.ScriptID,
+		ScriptIDs:   cfg.ScriptIDs,
+		AuthKey:     cfg.AuthKey,
+		VerifySSL:   cfg.VerifySSL,
+	}
+	return c.call("Core.SetGASRelay", args, &empty)
+}
+
+// --- V2Ray Core RPC Client ---
+
+func (c *coreClient) V2RayGetConfigs() []proxy.V2RayConfig {
+	var reply V2RayGetConfigsReply
+	if err := c.call("Core.V2RayGetConfigs", EmptyArgs{}, &reply); err != nil {
+		return nil
+	}
+	return reply.Configs
+}
+
+func (c *coreClient) V2RayAddConfig(link string) (*proxy.V2RayConfig, error) {
+	var reply V2RayAddConfigReply
+	if err := c.call("Core.V2RayAddConfig", StringArgs{Value: link}, &reply); err != nil {
+		return nil, err
+	}
+	if reply.Error != "" {
+		return nil, fmt.Errorf(reply.Error)
+	}
+	return reply.Config, nil
+}
+
+func (c *coreClient) V2RayDeleteConfig(id string) error {
+	var empty EmptyArgs
+	return c.call("Core.V2RayDeleteConfig", V2RayIDArgs{ID: id}, &empty)
+}
+
+func (c *coreClient) V2RaySelectConfig(id string) error {
+	var empty EmptyArgs
+	return c.call("Core.V2RaySelectConfig", V2RayIDArgs{ID: id}, &empty)
+}
+
+func (c *coreClient) V2RayClearConfigs() error {
+	var empty EmptyArgs
+	return c.call("Core.V2RayClearConfigs", EmptyArgs{}, &empty)
+}
+
+func (c *coreClient) V2RayGetSelectedConfig() *proxy.V2RayConfig {
+	var reply V2RayAddConfigReply
+	if err := c.call("Core.V2RayGetSelectedConfig", EmptyArgs{}, &reply); err != nil {
+		return nil
+	}
+	return reply.Config
+}
+
+func (c *coreClient) V2RayStartCore() error {
+	var empty EmptyArgs
+	return c.call("Core.V2RayStartCore", EmptyArgs{}, &empty)
+}
+
+func (c *coreClient) V2RayStopCore() error {
+	var empty EmptyArgs
+	return c.call("Core.V2RayStopCore", EmptyArgs{}, &empty)
+}
+
+func (c *coreClient) V2RayGetSettings() proxy.V2RaySettings {
+	var reply V2RaySettingsReply
+	if err := c.call("Core.V2RayGetSettings", EmptyArgs{}, &reply); err != nil {
+		return proxy.V2RaySettings{RoutingMode: "rule"}
+	}
+	return reply.Settings
+}
+
+func (c *coreClient) V2RaySaveSettings(s proxy.V2RaySettings) error {
+	var empty EmptyArgs
+	return c.call("Core.V2RaySaveSettings", V2RaySettingsArgs{Settings: s}, &empty)
+}
+
+func (c *coreClient) SwitchMode(mode string) error {
+	if err := c.ensureRunning(); err != nil {
+		return err
+	}
+	var empty EmptyArgs
+	return c.call("Core.SetProxyMode", SetModeArgs{Mode: mode}, &empty)
+}
+
+func (c *coreClient) GetRoutingMode() string {
+	settings := c.V2RayGetSettings()
+	if settings.RoutingMode != "" {
+		return settings.RoutingMode
+	}
+	return "rule"
+}
+
 func sameExecutable(left, right string) bool {
 	left = strings.TrimSpace(left)
 	right = strings.TrimSpace(right)

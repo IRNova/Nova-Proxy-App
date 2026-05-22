@@ -18,6 +18,7 @@ const (
 	AutoRoutingDefault        AutoRoutingMode = "default" // ECH / TLS-RF / direct
 	AutoRoutingServerFallback AutoRoutingMode = "server"  // + Server fallback
 	AutoRoutingGAS            AutoRoutingMode = "gas"     // + GAS domain fronting
+	AutoRoutingV2Ray          AutoRoutingMode = "v2ray"   // + All traffic through V2Ray core
 )
 
 // AutoRoutingConfig is persisted in settings.json.
@@ -169,6 +170,11 @@ func (ar *AutoRouter) Decide(host string) Rule {
 	// GAS mode: all traffic through GAS tunnel, no GFW list needed
 	if mode == AutoRoutingGAS {
 		return Rule{Mode: "gas", Enabled: true, AutoRouted: true}
+	}
+
+	// V2Ray mode: all traffic through V2Ray core, no GFW list needed
+	if mode == AutoRoutingV2Ray {
+		return Rule{Mode: "v2ray", Enabled: true, AutoRouted: true}
 	}
 
 	if !ar.gfwList.IsBlocked(host) {

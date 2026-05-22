@@ -21,6 +21,7 @@ import (
 	"net"
 	"net/http"
 	"net/textproto"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -77,14 +78,53 @@ type ProxyServer struct {
 	// Set via SetGASDialAddr(); cleared when GAS proxy stops.
 	gasDialAddr string
 
+	// gasRelay is the direct GAS relay engine. When set (non-nil), all traffic
+	// is handled directly by this proxy — MITM + relayRequest — instead of
+	// forwarding to a separate GAS proxy server. This is the MHR-style one-port flow.
+	gasRelay *gasRelay
+
 	// SOCKS5 proxy settings
 	socksAddr     string
 	socksListener net.Listener
 	socksRunning  bool
 	socksWg       sync.WaitGroup
 
+	// V2Ray core proxy settings (SOCKS5 and HTTP ports)
+	v2rayPort     int
+	v2rayHTTPPort int
+
 	// Process monitor for tracking connected apps
 	procMonitor *ProcessMonitor
+}
+
+func (p *ProxyServer) SetV2RayPort(socksPort int) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.v2rayPort = socksPort
+}
+
+func (p *ProxyServer) GetV2RayPort() int {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	if p.v2rayPort == 0 {
+		return 11808
+	}
+	return p.v2rayPort
+}
+
+func (p *ProxyServer) SetV2RayHTTPPort(httpPort int) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.v2rayHTTPPort = httpPort
+}
+
+func (p *ProxyServer) GetV2RayHTTPPort() int {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	if p.v2rayHTTPPort == 0 {
+		return 11809
+	}
+	return p.v2rayHTTPPort
 }
 
 type RuleManager struct {
@@ -1098,6 +1138,20 @@ func (p *ProxyServer) SetGASDialAddr(addr string) {
 	log.Printf("[Proxy] GAS dial address set to: %s", addr)
 }
 
+// SetGasRelay injects a gasRelay directly into this proxy. When non-nil, all traffic
+// (HTTP + CONNECT) is handled via MITM + relayRequest on this proxy — no separate
+// GAS proxy server needed. This is the MHR-style one-port architecture.
+func (p *ProxyServer) SetGasRelay(r *gasRelay) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.gasRelay = r
+	if r != nil {
+		log.Printf("[Proxy] GAS relay engine injected — now acting as single-port GAS proxy")
+	} else {
+		log.Printf("[Proxy] GAS relay engine cleared")
+	}
+}
+
 func (p *ProxyServer) SetSOCKSAddr(addr string) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -1172,7 +1226,7 @@ func (p *ProxyServer) UpdateECHProfileConfig(profileID string, configBytes []byt
 
 func (p *ProxyServer) SetMode(mode string) error {
 	mode = strings.ToLower(strings.TrimSpace(mode))
-	if mode != "mitm" && mode != "transparent" && mode != "tls-rf" && mode != "quic" && mode != "gas" {
+	if mode != "mitm" && mode != "transparent" && mode != "tls-rf" && mode != "quic" && mode != "gas" && mode != "v2ray" && mode != "rule" {
 		return fmt.Errorf("invalid proxy mode: %s", mode)
 	}
 	p.mu.Lock()
@@ -1339,8 +1393,19 @@ func (p *ProxyServer) handleConnect(w http.ResponseWriter, req *http.Request, ru
 	targetHost := normalizeHost(targetAuthority)
 	targetAddr := ensureAddrWithPort(targetAuthority, "443")
 
-	// GAS active: forward ALL traffic through local GAS proxy
-	if p.gasDialAddr != "" {
+	p.mu.RLock()
+	relay := p.gasRelay
+	gasAddr := p.gasDialAddr
+	p.mu.RUnlock()
+
+	// gasRelay active: handle MITM + GAS relay directly on this proxy (MHR-style)
+	if relay != nil {
+		p.handleGASRelayConnect(w, req, targetHost, targetAuthority)
+		return
+	}
+
+	// GAS active (legacy two-layer): forward ALL traffic through local GAS proxy
+	if gasAddr != "" {
 		p.handleGASConnect(w, req, targetHost, targetAuthority)
 		return
 	}
@@ -1380,6 +1445,20 @@ func (p *ProxyServer) handleConnect(w http.ResponseWriter, req *http.Request, ru
 
 	// For direct mode, connect directly to target
 	if effectiveMode == "direct" {
+		p.directConnect(w, req)
+		return
+	}
+
+	// V2Ray mode: forward traffic through V2Ray core SOCKS5/HTTP proxy
+	if effectiveMode == "v2ray" {
+		p.tracef("[Connect] v2ray mode for %s, forwarding through V2Ray core", targetHost)
+		p.handleV2RayConnect(w, req, targetHost, targetAddr)
+		return
+	}
+
+	// Gas mode requested but no GAS relay available — fall back to direct
+	if effectiveMode == "gas" {
+		p.tracef("[Connect] gas mode requested but GAS relay not available — direct fallback for %s", targetHost)
 		p.directConnect(w, req)
 		return
 	}
@@ -1732,21 +1811,406 @@ func (p *ProxyServer) handleGASConnect(w http.ResponseWriter, req *http.Request,
 	clientConn = wrapHijackedConn(clientConn, rw)
 	log.Printf("[GAS] Step 6: starting bidirectional copy between client and GAS proxy")
 
-	// Bidirectional copy
+	// Bidirectional copy with pooled buffers
 	var wg sync.WaitGroup
 	wg.Add(2)
+	var closeOnce sync.Once
+	closeAll := func() {
+		closeOnce.Do(func() {
+			clientConn.Close()
+			gasConn.Close()
+		})
+	}
+	buf1 := tunnelBufPool.Get().(*[]byte)
+	buf2 := tunnelBufPool.Get().(*[]byte)
 	go func() {
-		n, err := io.Copy(clientConn, gasConn)
+		defer tunnelBufPool.Put(buf1)
+		defer closeAll()
+		n, err := io.CopyBuffer(clientConn, gasConn, *buf1)
 		log.Printf("[GAS] io.Copy gas->client: %d bytes, err=%v", n, err)
 		wg.Done()
 	}()
 	go func() {
-		n, err := io.Copy(gasConn, clientConn)
+		defer tunnelBufPool.Put(buf2)
+		defer closeAll()
+		n, err := io.CopyBuffer(gasConn, clientConn, *buf2)
 		log.Printf("[GAS] io.Copy client->gas: %d bytes, err=%v", n, err)
 		wg.Done()
 	}()
 	wg.Wait()
 	log.Printf("[GAS] Step 7: bidirectional copy finished")
+}
+
+// handleV2RayConnect handles a CONNECT request by forwarding it through the V2Ray core proxy.
+func (p *ProxyServer) handleV2RayConnect(w http.ResponseWriter, req *http.Request, targetHost, targetAddr string) {
+	v2rayPort := p.GetV2RayPort()
+	v2rayAddr := fmt.Sprintf("127.0.0.1:%d", v2rayPort)
+
+	log.Printf("[V2Ray] Forwarding CONNECT %s through V2Ray SOCKS5 at %s", targetAddr, v2rayAddr)
+
+	// Connect to V2Ray SOCKS5 proxy
+	v2rayConn, err := net.DialTimeout("tcp", v2rayAddr, 10*time.Second)
+	if err != nil {
+		log.Printf("[V2Ray] Failed to connect to V2Ray SOCKS5 at %s: %v — direct fallback", v2rayAddr, err)
+		p.directConnect(w, req)
+		return
+	}
+	defer v2rayConn.Close()
+
+	// SOCKS5 CONNECT handshake
+	// Version 5, 1 auth method (no auth)
+	_, err = v2rayConn.Write([]byte{0x05, 0x01, 0x00})
+	if err != nil {
+		log.Printf("[V2Ray] SOCKS5 handshake write failed: %v", err)
+		p.directConnect(w, req)
+		return
+	}
+
+	// Read SOCKS5 response
+	resp := make([]byte, 2)
+	_, err = io.ReadFull(v2rayConn, resp)
+	if err != nil || resp[0] != 0x05 || resp[1] != 0x00 {
+		log.Printf("[V2Ray] SOCKS5 handshake failed: %v resp=%v", err, resp)
+		p.directConnect(w, req)
+		return
+	}
+
+	// Parse target host/port
+	targetHostOnly, targetPort, _ := net.SplitHostPort(targetAddr)
+	if targetHostOnly == "" {
+		targetHostOnly = targetHost
+	}
+	portInt, _ := strconv.Atoi(targetPort)
+	if portInt == 0 {
+		portInt = 443
+	}
+
+	// Build SOCKS5 CONNECT command
+	// For domain names, use ATYP_DOMAINNAME (0x03)
+	var atyp byte
+	var addrBytes []byte
+	if ip := net.ParseIP(targetHostOnly); ip != nil {
+		if ip4 := ip.To4(); ip4 != nil {
+			atyp = 0x01 // IPv4
+			addrBytes = ip4
+		} else {
+			atyp = 0x04 // IPv6
+			addrBytes = ip.To16()
+		}
+	} else {
+		atyp = 0x03 // Domain name
+		if len(targetHostOnly) > 255 {
+			log.Printf("[V2Ray] Domain name too long: %s", targetHostOnly)
+			p.directConnect(w, req)
+			return
+		}
+		addrBytes = []byte{byte(len(targetHostOnly))}
+		addrBytes = append(addrBytes, []byte(targetHostOnly)...)
+	}
+
+	cmd := []byte{0x05, 0x01, 0x00, atyp}
+	cmd = append(cmd, addrBytes...)
+	cmd = append(cmd, byte(portInt>>8), byte(portInt))
+
+	_, err = v2rayConn.Write(cmd)
+	if err != nil {
+		log.Printf("[V2Ray] SOCKS5 CONNECT write failed: %v", err)
+		p.directConnect(w, req)
+		return
+	}
+
+	// Read SOCKS5 CONNECT response (first 4 bytes: ver, rep, rsv, atyp)
+	connectResp := make([]byte, 4)
+	_, err = io.ReadFull(v2rayConn, connectResp)
+	if err != nil || connectResp[1] != 0x00 {
+		log.Printf("[V2Ray] SOCKS5 CONNECT rejected: %v resp=%v", err, connectResp)
+		http.Error(w, "V2Ray core rejected connection", http.StatusBadGateway)
+		return
+	}
+
+	// Read remaining SOCKS5 response (bound address)
+	// Skip bind address based on ATYP
+	switch connectResp[3] {
+	case 0x01:
+		_, _ = io.ReadFull(v2rayConn, make([]byte, 6)) // IPv4 (4) + Port (2)
+	case 0x03:
+		lenBuf := make([]byte, 1)
+		_, _ = io.ReadFull(v2rayConn, lenBuf)
+		_, _ = io.ReadFull(v2rayConn, make([]byte, int(lenBuf[0])+2))
+	case 0x04:
+		_, _ = io.ReadFull(v2rayConn, make([]byte, 18)) // IPv6 (16) + Port (2)
+	}
+
+	log.Printf("[V2Ray] SOCKS5 CONNECT successful for %s", targetAddr)
+
+	// Hijack client connection
+	hijacker, ok := w.(http.Hijacker)
+	if !ok {
+		http.Error(w, "Hijack not supported", http.StatusInternalServerError)
+		return
+	}
+	clientConn, rw, err := hijacker.Hijack()
+	if err != nil {
+		log.Printf("[V2Ray] Hijack failed: %v", err)
+		return
+	}
+	defer clientConn.Close()
+
+	// Send 200 to client
+	if _, err := rw.WriteString("HTTP/1.1 200 Connection Established\r\n\r\n"); err != nil {
+		log.Printf("[V2Ray] 200 write failed: %v", err)
+		return
+	}
+	if err := rw.Flush(); err != nil {
+		log.Printf("[V2Ray] flush failed: %v", err)
+		return
+	}
+	clientConn = wrapHijackedConn(clientConn, rw)
+
+	// Bidirectional copy with pooled buffers
+	var wg sync.WaitGroup
+	wg.Add(2)
+	var closeOnce sync.Once
+	closeAll := func() {
+		closeOnce.Do(func() {
+			clientConn.Close()
+			v2rayConn.Close()
+		})
+	}
+	buf1 := tunnelBufPool.Get().(*[]byte)
+	buf2 := tunnelBufPool.Get().(*[]byte)
+	go func() {
+		defer tunnelBufPool.Put(buf1)
+		defer closeAll()
+		io.CopyBuffer(clientConn, v2rayConn, *buf1)
+		wg.Done()
+	}()
+	go func() {
+		defer tunnelBufPool.Put(buf2)
+		defer closeAll()
+		io.CopyBuffer(v2rayConn, clientConn, *buf2)
+		wg.Done()
+	}()
+	wg.Wait()
+}
+
+// handleV2RayHTTP handles non-CONNECT HTTP requests by forwarding through V2Ray HTTP proxy.
+func (p *ProxyServer) handleV2RayHTTP(w http.ResponseWriter, req *http.Request) {
+	v2rayHTTPPort := p.GetV2RayHTTPPort()
+	v2rayHTTPAddr := fmt.Sprintf("127.0.0.1:%d", v2rayHTTPPort)
+
+	log.Printf("[V2Ray] Forwarding HTTP request %s %s through V2Ray at %s", req.Method, req.URL.String(), v2rayHTTPAddr)
+
+	proxyURL, _ := url.Parse(fmt.Sprintf("http://%s", v2rayHTTPAddr))
+	transport := &http.Transport{
+		Proxy: http.ProxyURL(proxyURL),
+	}
+
+	resp, err := transport.RoundTrip(req)
+	if err != nil {
+		log.Printf("[V2Ray] HTTP forward failed: %v", err)
+		http.Error(w, "V2Ray proxy failed", http.StatusBadGateway)
+		return
+	}
+	defer resp.Body.Close()
+
+	for key, values := range resp.Header {
+		for _, value := range values {
+			w.Header().Add(key, value)
+		}
+	}
+	w.WriteHeader(resp.StatusCode)
+	io.Copy(w, resp.Body)
+}
+
+// handleGASRelayConnect handles a CONNECT request directly through the gasRelay engine,
+// performing MITM on this proxy (no separate GAS proxy server hop). This is the MHR-style flow:
+//   Client -> Main Proxy (MITM + relayRequest) -> Google Apps Script
+func (p *ProxyServer) handleGASRelayConnect(w http.ResponseWriter, req *http.Request, targetHost, targetAuthority string) {
+	p.mu.RLock()
+	relay := p.gasRelay
+	p.mu.RUnlock()
+
+	if relay == nil {
+		log.Printf("[GAS-RELAY] handleGASRelayConnect called but gasRelay is nil — direct fallback")
+		p.directConnect(w, req)
+		return
+	}
+
+	host, port := gasSplitHostPort(targetAuthority, 443)
+	log.Printf("[GAS-RELAY] CONNECT %s (host=%s port=%d)", targetAuthority, host, port)
+
+	hijacker, ok := w.(http.Hijacker)
+	if !ok {
+		http.Error(w, "Hijack not supported", http.StatusInternalServerError)
+		return
+	}
+	clientConn, rw, err := hijacker.Hijack()
+	if err != nil {
+		log.Printf("[GAS-RELAY] Hijack failed: %v", err)
+		return
+	}
+	defer clientConn.Close()
+
+	if _, err := rw.WriteString("HTTP/1.1 200 Connection Established\r\n\r\n"); err != nil {
+		log.Printf("[GAS-RELAY] 200 write failed: %v", err)
+		return
+	}
+	if err := rw.Flush(); err != nil {
+		log.Printf("[GAS-RELAY] flush failed: %v", err)
+		return
+	}
+	clientConn = wrapHijackedConn(clientConn, rw)
+	_ = clientConn.SetDeadline(time.Time{})
+
+	if port == 443 {
+		// Generate MITM cert for this host
+		gen := p.certGenerator
+		if gen == nil {
+			log.Printf("[GAS-RELAY] No cert generator available — raw TCP relay for %s", host)
+			relayRawTCPToGAS(relay, host, port, clientConn)
+			return
+		}
+		caCert := gen.GetCACert()
+		caKey := gen.GetCAKey()
+		if caCert == nil || caKey == nil {
+			log.Printf("[GAS-RELAY] CA cert/key unavailable — raw TCP relay for %s", host)
+			relayRawTCPToGAS(relay, host, port, clientConn)
+			return
+		}
+
+		tlsCert, err := generateCertNow(host, caCert, caKey)
+		if err != nil {
+			log.Printf("[GAS-RELAY] Cert generation failed for %s: %v — raw TCP relay", host, err)
+			relayRawTCPToGAS(relay, host, port, clientConn)
+			return
+		}
+
+		tlsCfg := &tls.Config{
+			Certificates: []tls.Certificate{*tlsCert},
+			NextProtos:   []string{"http/1.1"},
+		}
+		tlsConn := tls.Server(clientConn, tlsCfg)
+		if err := tlsConn.Handshake(); err != nil {
+			log.Printf("[GAS-RELAY] TLS handshake failed for %s: %v — raw TCP relay", host, err)
+			relayRawTCPToGAS(relay, host, port, clientConn)
+			return
+		}
+
+		log.Printf("[GAS-RELAY] MITM established for %s", host)
+		relayHTTPOverTLSOnRelay(relay, host, port, tlsConn)
+		return
+	}
+
+	// Non-443 CONNECT: relay as HTTP through GAS
+	log.Printf("[GAS-RELAY] Non-443 CONNECT to %s:%d", host, port)
+	relayRawTCPToGAS(relay, host, port, clientConn)
+}
+
+// generateCertNow generates a per-domain TLS certificate signed by the given CA.
+func generateCertNow(host string, caCert *x509.Certificate, caKey interface{}) (*tls.Certificate, error) {
+	serial := big.NewInt(time.Now().UnixNano())
+	template := &x509.Certificate{
+		SerialNumber: serial,
+		Subject:      pkix.Name{CommonName: host},
+		NotBefore:    time.Now(),
+		NotAfter:     time.Now().Add(24 * time.Hour),
+		KeyUsage:     x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		template.IPAddresses = []net.IP{ip}
+	} else {
+		template.DNSNames = []string{host}
+	}
+	key, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	der, err := x509.CreateCertificate(rand.Reader, template, caCert, &key.PublicKey, caKey)
+	if err != nil {
+		return nil, err
+	}
+	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
+	caPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: caCert.Raw})
+	keyBytes, _ := x509.MarshalECPrivateKey(key)
+	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyBytes})
+	cert, err := tls.X509KeyPair(append(certPEM, caPEM...), keyPEM)
+	if err != nil {
+		return nil, err
+	}
+	return &cert, nil
+}
+
+// relayRawTCPToGAS reads raw bytes from the connection and relays them through GAS as HTTP.
+// For non-TLS CONNECT tunnels, the bytes are forwarded as-is via the GAS relay payload.
+func relayRawTCPToGAS(relay *gasRelay, host string, port int, conn net.Conn) {
+	defer conn.Close()
+	reader := bufio.NewReaderSize(conn, 4096)
+	for {
+		line, err := reader.ReadString('\n')
+		if err != nil {
+			return
+		}
+		var reqHeaders []string
+		reqHeaders = append(reqHeaders, line)
+		for {
+			ln, err := reader.ReadString('\n')
+			if err != nil {
+				return
+			}
+			reqHeaders = append(reqHeaders, ln)
+			if ln == "\r\n" || ln == "\n" {
+				break
+			}
+		}
+		method, path := gasParseRequestLine(line)
+		body := gasReadBody(reader, reqHeaders)
+		headerMap := gasParseHeaders(reqHeaders[1:])
+		urlStr := gasNormalizeURL(host, port, path)
+		origin := headerValue(headerMap, "origin")
+		response := relay.relayRequest(method, urlStr, headerMap, body)
+		if origin != "" {
+			response = gasInjectCORS(response, origin)
+		}
+		_, _ = conn.Write(response)
+	}
+}
+
+// relayHTTPOverTLSOnRelay reads HTTP/1.1 requests from a decrypted TLS connection and
+// relays each through the gasRelay engine. Same logic as relayHTTPOverTLS but operates
+// on a standalone gasRelay instead of a gasProxyServer.
+func relayHTTPOverTLSOnRelay(relay *gasRelay, host string, port int, conn net.Conn) {
+	_ = conn.SetDeadline(time.Now().Add(120 * time.Second))
+	relayReader := bufio.NewReaderSize(conn, 4096)
+	for {
+		line, err := relayReader.ReadString('\n')
+		if err != nil {
+			return
+		}
+		if line == "\r\n" || line == "\n" {
+			continue
+		}
+		var reqHeaders []string
+		reqHeaders = append(reqHeaders, line)
+		for {
+			ln, err := relayReader.ReadString('\n')
+			if err != nil {
+				return
+			}
+			reqHeaders = append(reqHeaders, ln)
+			if ln == "\r\n" || ln == "\n" {
+				break
+			}
+		}
+		method, path := gasParseRequestLine(line)
+		body := gasReadBody(relayReader, reqHeaders)
+		headerMap := gasParseHeaders(reqHeaders[1:])
+		urlStr := gasNormalizeURL(host, port, path)
+		origin := headerValue(headerMap, "origin")
+		response := relay.relayRequest(method, urlStr, headerMap, body)
+		if origin != "" {
+			response = gasInjectCORS(response, origin)
+		}
+		_, _ = conn.Write(response)
+	}
 }
 
 // handleGASHTTP handles a plain HTTP request by forwarding it through the local GAS proxy server.
@@ -1800,8 +2264,34 @@ func (p *ProxyServer) handleGASHTTP(w http.ResponseWriter, req *http.Request) {
 	// Read response from GAS proxy
 	resp, err := http.ReadResponse(bufio.NewReader(gasConn), req)
 	if err != nil {
-		log.Printf("[GAS] Response read failed: %v", err)
-		http.Error(w, "GAS proxy response failed", http.StatusBadGateway)
+		log.Printf("[GAS] Response read failed: %v — retrying once", err)
+		gasConn.Close()
+		gasConn2, err2 := net.DialTimeout("tcp", p.gasDialAddr, 10*time.Second)
+		if err2 != nil {
+			log.Printf("[GAS] Retry dial failed: %v", err2)
+			http.Error(w, "GAS proxy response failed", http.StatusBadGateway)
+			return
+		}
+		defer gasConn2.Close()
+		if err2 := req.WriteProxy(gasConn2); err2 != nil {
+			log.Printf("[GAS] Retry write failed: %v", err2)
+			http.Error(w, "GAS proxy request failed", http.StatusBadGateway)
+			return
+		}
+		resp, err = http.ReadResponse(bufio.NewReader(gasConn2), req)
+		if err != nil {
+			log.Printf("[GAS] Retry response also failed: %v", err)
+			http.Error(w, "GAS proxy response failed", http.StatusBadGateway)
+			return
+		}
+		defer resp.Body.Close()
+		for key, values := range resp.Header {
+			for _, value := range values {
+				w.Header().Add(key, value)
+			}
+		}
+		w.WriteHeader(resp.StatusCode)
+		io.Copy(w, resp.Body)
 		return
 	}
 	defer resp.Body.Close()
@@ -1814,6 +2304,69 @@ func (p *ProxyServer) handleGASHTTP(w http.ResponseWriter, req *http.Request) {
 	}
 	w.WriteHeader(resp.StatusCode)
 	io.Copy(w, resp.Body)
+}
+
+// handleGASRelayHTTP handles a plain HTTP request directly through the gasRelay engine
+// without proxying through a separate GAS proxy server (MHR-style one-port flow).
+func (p *ProxyServer) handleGASRelayHTTP(w http.ResponseWriter, req *http.Request, relay *gasRelay) {
+	log.Printf("[GAS-RELAY] HTTP %s %s", req.Method, req.URL.String())
+
+	// Extract headers map
+	headers := make(map[string]string)
+	for k, v := range req.Header {
+		if len(v) > 0 {
+			headers[k] = v[0]
+		}
+	}
+
+	body, _ := io.ReadAll(req.Body)
+	req.Body.Close()
+
+	urlStr := req.URL.String()
+	origin := headerValue(headers, "origin")
+	response := relay.relayRequest(req.Method, urlStr, headers, body)
+
+	if response == nil {
+		http.Error(w, "GAS relay returned empty response", http.StatusBadGateway)
+		return
+	}
+
+	if origin != "" {
+		response = gasInjectCORS(response, origin)
+	}
+
+	// Parse and write the response
+	respBytes := response
+	sep := []byte("\r\n\r\n")
+	idx := bytes.Index(respBytes, sep)
+	if idx < 0 {
+		http.Error(w, "Invalid GAS relay response", http.StatusBadGateway)
+		return
+	}
+	headerPart := string(respBytes[:idx])
+	bodyPart := respBytes[idx+4:]
+
+	// Parse status line
+	statusLines := strings.SplitN(headerPart, "\r\n", 2)
+	statusParts := strings.SplitN(statusLines[0], " ", 3)
+	statusCode := 200
+	if len(statusParts) >= 2 {
+		if c, err := strconv.Atoi(statusParts[1]); err == nil {
+			statusCode = c
+		}
+	}
+
+	// Write headers
+	for _, line := range strings.Split(headerPart, "\r\n")[1:] {
+		if parts := strings.SplitN(line, ": ", 2); len(parts) == 2 {
+			w.Header().Add(parts[0], parts[1])
+		}
+	}
+
+	w.WriteHeader(statusCode)
+	if len(bodyPart) > 0 {
+		_, _ = w.Write(bodyPart)
+	}
 }
 
 // socksAcceptLoop accepts SOCKS5 connections and spawns a handler goroutine.
@@ -1920,8 +2473,16 @@ func (p *ProxyServer) handleSOCKS5(conn net.Conn) {
 // and HTTP traffic goes through GAS's HTTP handler. Otherwise creates a direct TCP tunnel.
 func (p *ProxyServer) socksRelay(host string, port int, conn net.Conn) {
 	p.mu.RLock()
+	relay := p.gasRelay
 	gasAddr := p.gasDialAddr
 	p.mu.RUnlock()
+
+	// gasRelay active: handle directly on this proxy (MHR-style)
+	if relay != nil {
+		log.Printf("[SOCKS5] GAS relay direct for %s:%d", host, port)
+		p.socksGASRelayDirect(host, port, conn, relay)
+		return
+	}
 
 	if gasAddr == "" {
 		log.Printf("[SOCKS5] direct TCP tunnel to %s:%d", host, port)
@@ -1965,17 +2526,80 @@ func (p *ProxyServer) socksRelay(host string, port int, conn net.Conn) {
 	p.socksTunnel(conn, gasConn)
 }
 
-// socksTunnel performs bidirectional copy between two connections.
+// socksGASRelayDirect handles a SOCKS5 connection directly through the gasRelay engine
+// (MHR-style one-port flow). For port 443 it performs MITM; for non-TLS or non-HTTP
+// protocols it falls back to a direct TCP tunnel since GAS only supports HTTP relay.
+func (p *ProxyServer) socksGASRelayDirect(host string, port int, conn net.Conn, relay *gasRelay) {
+	defer conn.Close()
+
+	log.Printf("[SOCKS5-GAS] Direct relay %s:%d", host, port)
+
+	if port == 443 {
+		gen := p.certGenerator
+		if gen == nil {
+			log.Printf("[SOCKS5-GAS] No cert generator — direct TCP tunnel for %s", host)
+			p.socksDirect(host, port, conn)
+			return
+		}
+		caCert := gen.GetCACert()
+		caKey := gen.GetCAKey()
+		if caCert == nil || caKey == nil {
+			log.Printf("[SOCKS5-GAS] CA unavailable — direct TCP tunnel for %s", host)
+			p.socksDirect(host, port, conn)
+			return
+		}
+
+		tlsCert, err := generateCertNow(host, caCert, caKey)
+		if err != nil {
+			log.Printf("[SOCKS5-GAS] Cert gen failed for %s: %v — direct TCP tunnel", host, err)
+			p.socksDirect(host, port, conn)
+			return
+		}
+
+		tlsCfg := &tls.Config{
+			Certificates: []tls.Certificate{*tlsCert},
+			NextProtos:   []string{"http/1.1"},
+		}
+		tlsConn := tls.Server(conn, tlsCfg)
+		if err := tlsConn.Handshake(); err != nil {
+			log.Printf("[SOCKS5-GAS] TLS handshake failed for %s: %v — direct TCP tunnel", host, err)
+			p.socksDirect(host, port, conn)
+			return
+		}
+
+		log.Printf("[SOCKS5-GAS] MITM established for %s", host)
+		relayHTTPOverTLSOnRelay(relay, host, port, tlsConn)
+		return
+	}
+
+	// Non-443 SOCKS5: direct TCP tunnel (GAS only supports HTTP relay)
+	p.socksDirect(host, port, conn)
+}
+
+// socksTunnel performs bidirectional copy between two connections using pooled buffers.
 func (p *ProxyServer) socksTunnel(client, upstream net.Conn) {
 	var wg sync.WaitGroup
 	wg.Add(2)
+	var closeOnce sync.Once
+	closeAll := func() {
+		closeOnce.Do(func() {
+			client.Close()
+			upstream.Close()
+		})
+	}
+	buf1 := tunnelBufPool.Get().(*[]byte)
+	buf2 := tunnelBufPool.Get().(*[]byte)
 	go func() {
-		n, err := io.Copy(upstream, client)
+		defer tunnelBufPool.Put(buf1)
+		defer closeAll()
+		n, err := io.CopyBuffer(upstream, client, *buf1)
 		log.Printf("[SOCKS5] io.Copy client->upstream: %d bytes, err=%v", n, err)
 		wg.Done()
 	}()
 	go func() {
-		n, err := io.Copy(client, upstream)
+		defer tunnelBufPool.Put(buf2)
+		defer closeAll()
+		n, err := io.CopyBuffer(client, upstream, *buf2)
 		log.Printf("[SOCKS5] io.Copy upstream->client: %d bytes, err=%v", n, err)
 		wg.Done()
 	}()
@@ -2000,9 +2624,27 @@ func (p *ProxyServer) handleHTTP(w http.ResponseWriter, req *http.Request, rule 
 	newReq.RequestURI = ""
 	newReq.Header.Del("Proxy-Connection")
 
-	// GAS active: forward ALL HTTP traffic through local GAS proxy
-	if p.gasDialAddr != "" {
+	// gasRelay active: handle directly on this proxy (MHR-style)
+	p.mu.RLock()
+	relay := p.gasRelay
+	gasAddr := p.gasDialAddr
+	p.mu.RUnlock()
+
+	if relay != nil {
+		p.handleGASRelayHTTP(w, newReq, relay)
+		return
+	}
+
+	// GAS active (legacy two-layer): forward ALL HTTP traffic through local GAS proxy
+	if gasAddr != "" {
 		p.handleGASHTTP(w, newReq)
+		return
+	}
+
+	// V2Ray mode: forward through V2Ray HTTP proxy
+	if rule.Mode == "v2ray" {
+		log.Printf("[V2Ray] Forwarding HTTP %s through V2Ray core", req.URL.String())
+		p.handleV2RayHTTP(w, newReq)
 		return
 	}
 
@@ -2032,6 +2674,26 @@ func (p *ProxyServer) handleHTTP(w http.ResponseWriter, req *http.Request, rule 
 			httpsURL.Host = req.Host
 		}
 		http.Redirect(w, req, httpsURL.String(), http.StatusMovedPermanently)
+		return
+	}
+
+	if rule.Mode == "gas" {
+		// gas mode but no GAS relay available — direct fallback
+		log.Printf("[HTTP] rule mode is 'gas' but GAS not running — direct fallback for %s", req.URL.String())
+		resp, err := p.transport.RoundTrip(newReq)
+		if err != nil {
+			log.Printf("[HTTP] GAS fallback direct failed: %v", err)
+			http.Error(w, "Failed to proxy", http.StatusBadGateway)
+			return
+		}
+		defer resp.Body.Close()
+		for key, values := range resp.Header {
+			for _, value := range values {
+				w.Header().Add(key, value)
+			}
+		}
+		w.WriteHeader(resp.StatusCode)
+		io.Copy(w, resp.Body)
 		return
 	}
 
@@ -2099,7 +2761,7 @@ func (p *ProxyServer) handleHTTP(w http.ResponseWriter, req *http.Request, rule 
 	}
 	defer resp.Body.Close()
 
-	// 复制响应头
+	// Copy response headers
 	for key, values := range resp.Header {
 		for _, value := range values {
 			w.Header().Add(key, value)
@@ -2311,6 +2973,39 @@ func (r *RuleManager) matchRule(host, mode string) Rule {
 	host = normalizeHost(host)
 	mode = strings.ToLower(strings.TrimSpace(mode))
 
+	// When global ProxyServer mode is "v2ray", all traffic goes through V2Ray core
+	if mode == "v2ray" {
+		log.Printf("[Router] %s -> v2ray (global mode)", host)
+		r.emitRouteEvent(host, "v2ray")
+		return Rule{Mode: "v2ray", Enabled: true}
+	}
+
+	// When global ProxyServer mode is "gas", all traffic goes through GAS
+	// regardless of manual rules. The gasRelay check in handleConnect/handleHTTP
+	// catches the case where GAS is running; this is a safety net when it is not.
+	if mode == "gas" {
+		log.Printf("[Router] %s -> gas (global mode)", host)
+		r.emitRouteEvent(host, "gas")
+		return Rule{Mode: "gas", Enabled: true}
+	}
+
+	// Auto-route layer: when auto-routing mode is "v2ray" or "gas",
+	// ALL traffic uses that global mode regardless of manual rules
+	if r.autoRouter != nil {
+		autoMode := r.autoRoutingConfig.Mode
+		if autoMode == "v2ray" {
+			log.Printf("[Router] %s -> v2ray (auto-route global mode)", host)
+			r.emitRouteEvent(host, "v2ray")
+			return Rule{Mode: "v2ray", Enabled: true, AutoRouted: true}
+		}
+		if autoMode == "gas" {
+			log.Printf("[Router] %s -> gas (auto-route global mode)", host)
+			r.emitRouteEvent(host, "gas")
+			return Rule{Mode: "gas", Enabled: true, AutoRouted: true}
+		}
+	}
+
+	// When global mode is "rule", use manual rules from rules page
 	best := Rule{}
 	bestScore := -1
 	for _, rule := range r.rules {
@@ -4034,7 +4729,7 @@ func (p *ProxyServer) establishUpstreamConn(host string, rule Rule, dialCandidat
 						if rule.ECHProfileID != "" {
 							p.UpdateECHProfileConfig(rule.ECHProfileID, newECH)
 						}
-						// 第二次尝试将自动从 Profile 读取新配置
+						// Second attempt will auto-read new config from Profile
 						continue
 					}
 
@@ -4050,7 +4745,7 @@ func (p *ProxyServer) establishUpstreamConn(host string, rule Rule, dialCandidat
 				}
 			}
 
-			// 最终失败处理
+			// Final failure handling
 			errs = append(errs, fmt.Sprintf("%s utls: %v", addr, utlsErr))
 			if rule.UseCFPool && p.cfPool != nil {
 				h, _, _ := net.SplitHostPort(addr)
@@ -4058,7 +4753,7 @@ func (p *ProxyServer) establishUpstreamConn(host string, rule Rule, dialCandidat
 					p.cfPool.ReportFailure(h)
 				}
 			}
-			break // 换下一个 IP
+			break // Move to next IP
 		}
 	}
 

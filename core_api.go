@@ -53,6 +53,10 @@ type LogsArgs struct {
 	Limit int
 }
 
+type StringArgs struct {
+	Value string
+}
+
 type SetGASDialAddrArgs struct {
 	Addr string
 }
@@ -160,17 +164,145 @@ func (s *coreService) GetRouteEvents(_ EmptyArgs, reply *RouteEventsReply) error
 }
 
 func (s *coreService) SetProxyMode(args SetModeArgs, _ *EmptyArgs) error {
-	return s.runtime.proxyServer.SetMode(args.Mode)
+	// Handle both old-style modes and new routing modes
+	switch args.Mode {
+	case "rule", "gas", "v2ray":
+		return s.runtime.switchMode(args.Mode)
+	default:
+		// Legacy mode support for backward compatibility
+		return s.runtime.proxyServer.SetMode(args.Mode)
+	}
 }
 
 func (s *coreService) GetProxyMode(_ EmptyArgs, reply *StringReply) error {
-	reply.Value = s.runtime.proxyServer.GetMode()
+	reply.Value = s.runtime.getCurrentMode()
 	return nil
+}
+
+type SetGASRelayArgs struct {
+	Enabled     bool
+	GoogleIP    string
+	FrontDomain string
+	ScriptID    string
+	ScriptIDs   []string
+	AuthKey     string
+	VerifySSL   bool
 }
 
 func (s *coreService) SetGASDialAddr(args SetGASDialAddrArgs, _ *EmptyArgs) error {
 	s.runtime.proxyServer.SetGASDialAddr(args.Addr)
 	return nil
+}
+
+func (s *coreService) SetGASRelay(args SetGASRelayArgs, _ *EmptyArgs) error {
+	if !args.Enabled {
+		s.runtime.proxyServer.SetGasRelay(nil)
+		return nil
+	}
+	cfg := proxy.GASConfig{
+		GoogleIP:    args.GoogleIP,
+		FrontDomain: args.FrontDomain,
+		ScriptID:    args.ScriptID,
+		ScriptIDs:   args.ScriptIDs,
+		AuthKey:     args.AuthKey,
+		VerifySSL:   args.VerifySSL,
+	}
+	relay := proxy.NewGASRelay(cfg)
+	s.runtime.proxyServer.SetGasRelay(relay)
+	return nil
+}
+
+// --- V2Ray Core RPC ---
+
+type V2RayGetConfigsReply struct {
+	Configs []proxy.V2RayConfig
+}
+
+func (s *coreService) V2RayGetConfigs(_ EmptyArgs, reply *V2RayGetConfigsReply) error {
+	reply.Configs = s.runtime.v2rayManager.GetConfigs()
+	return nil
+}
+
+type V2RayAddConfigReply struct {
+	Config *proxy.V2RayConfig
+	Error  string
+}
+
+func (s *coreService) V2RayAddConfig(args StringArgs, reply *V2RayAddConfigReply) error {
+	cfg, err := s.runtime.v2rayManager.AddConfig(args.Value)
+	if err != nil {
+		reply.Error = err.Error()
+		return nil
+	}
+	reply.Config = cfg
+	return nil
+}
+
+type V2RayIDArgs struct {
+	ID string
+}
+
+func (s *coreService) V2RayDeleteConfig(args V2RayIDArgs, _ *EmptyArgs) error {
+	return s.runtime.v2rayManager.DeleteConfig(args.ID)
+}
+
+func (s *coreService) V2RaySelectConfig(args V2RayIDArgs, _ *EmptyArgs) error {
+	return s.runtime.v2rayManager.SelectConfig(args.ID)
+}
+
+func (s *coreService) V2RayClearConfigs(_ EmptyArgs, _ *EmptyArgs) error {
+	return s.runtime.v2rayManager.ClearConfigs()
+}
+
+func (s *coreService) V2RayGetSelectedConfig(_ EmptyArgs, reply *V2RayAddConfigReply) error {
+	cfg := s.runtime.v2rayManager.GetSelectedConfig()
+	if cfg == nil {
+		return nil
+	}
+	reply.Config = cfg
+	return nil
+}
+
+func (s *coreService) V2RayStartCore(_ EmptyArgs, _ *EmptyArgs) error {
+	s.runtime.v2rayManager.SetCoreRunning(true)
+	s.runtime.v2rayManager.SetCoreActive(true)
+	return nil
+}
+
+func (s *coreService) V2RayStopCore(_ EmptyArgs, _ *EmptyArgs) error {
+	s.runtime.v2rayManager.SetCoreRunning(false)
+	s.runtime.v2rayManager.SetCoreActive(false)
+	return nil
+}
+
+type V2RayCoreStatusReply struct {
+	Running bool
+	Active  bool
+	Port    int
+}
+
+func (s *coreService) V2RayCoreStatus(_ EmptyArgs, reply *V2RayCoreStatusReply) error {
+	reply.Running = s.runtime.v2rayManager.IsCoreRunning()
+	reply.Active = s.runtime.v2rayManager.IsCoreActive()
+	reply.Port = s.runtime.v2rayManager.GetCorePort()
+	return nil
+}
+
+type V2RaySettingsReply struct {
+	Settings proxy.V2RaySettings
+}
+
+type V2RaySettingsArgs struct {
+	Settings proxy.V2RaySettings
+}
+
+func (s *coreService) V2RayGetSettings(_ EmptyArgs, reply *V2RaySettingsReply) error {
+	reply.Settings = s.runtime.v2rayManager.GetSettings()
+	return nil
+}
+
+func (s *coreService) V2RaySaveSettings(args V2RaySettingsArgs, _ *EmptyArgs) error {
+	return s.runtime.v2rayManager.SaveSettings(args.Settings)
 }
 
 func runCoreMain() error {
@@ -179,7 +311,7 @@ func runCoreMain() error {
 		return err
 	}
 	defer runtime.shutdown()
-	writeCoreMarker(runtime.execDir, "run_core_main", markerDetail("entered pid=%d", os.Getpid()))
+	runtime.appendLog(fmt.Sprintf("[core] starting pid=%d", os.Getpid()))
 
 	server := rpc.NewServer()
 	var (
@@ -200,26 +332,23 @@ func runCoreMain() error {
 
 	listener, err = net.Listen("tcp", coreRPCAddr)
 	if err != nil {
-		writeCoreMarker(runtime.execDir, "run_core_main", markerDetail("listen failed: %v", err))
+		runtime.appendLog(fmt.Sprintf("[core] listen failed: %v", err))
 		return err
 	}
 	defer listener.Close()
-	writeCoreMarker(runtime.execDir, "run_core_main", markerDetail("listen ok addr=%s", coreRPCAddr))
+	runtime.appendLog(fmt.Sprintf("[core] listening on %s", coreRPCAddr))
 
 	for {
 		conn, err := listener.Accept()
 		if err != nil {
 			if errors.Is(err, net.ErrClosed) {
-				writeCoreMarker(runtime.execDir, "run_core_main", "listener closed")
 				return nil
 			}
 			if ne, ok := err.(net.Error); ok && (ne.Timeout() || ne.Temporary()) {
 				runtime.appendLog(fmt.Sprintf("[core] rpc accept temporary error: %v", err))
-				writeCoreMarker(runtime.execDir, "run_core_main", markerDetail("accept temporary error: %v", err))
 				continue
 			}
 			runtime.appendLog(fmt.Sprintf("[core] rpc accept error: %v", err))
-			writeCoreMarker(runtime.execDir, "run_core_main", markerDetail("accept error: %v", err))
 			continue
 		}
 		go func(conn net.Conn) {
