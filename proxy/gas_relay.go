@@ -18,12 +18,12 @@ import (
 	"encoding/pem"
 	"fmt"
 	"io"
-	"log"
 	"math/big"
 	"net"
 	"net/http"
 	"net/url"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -33,20 +33,39 @@ import (
 	"github.com/andybalholm/brotli"
 	"github.com/klauspost/compress/zstd"
 	"golang.org/x/net/http2"
+
+	"novaproxy/logging"
+)
+
+var (
+	relayLog      = logging.Get("GAS")
+	h2Log         = logging.Get("GAS-H2")
+	h1Log         = logging.Get("GAS-H1")
+	mitmLog       = logging.Get("GAS-MITM")
+	statsLog      = logging.Get("GAS-STATS")
+	gasCodecEncodings = "gzip, deflate, br, zstd"
 )
 
 const (
 	gasRelayTimeout      = 25
 	gasTLSConnectTimeout = 15
 	gasMaxRespBody       = 200 * 1024 * 1024
-	gasPoolMax           = 20
-	gasConnTTL           = 30.0
+	gasMaxPayloadSize    = 512 * 1024
+	gasPoolMax           = 50
+	gasConnTTL           = 45.0
 	gasCacheMaxMB        = 50
 	gasCacheTTLLong      = 3600
 	gasCacheTTLMed       = 1800
 	gasCacheTTLMax       = 86400
-	gasBatchMax          = 30
-	gasBatchWindow       = 10 * time.Millisecond
+	gasBatchMax            = 50
+	gasBatchWindow         = 5 * time.Millisecond
+	gasParallelRelay       = 3
+	chunkedMinSize         = 5 * 1024 * 1024
+	chunkedMaxParallel     = 3
+	chunkedChunkSize       = 2 * 1024 * 1024
+	gasStatsLogInterval    = 300
+	gasStatsLogTopN        = 10
+	gasScriptBlacklistTTL  = 600.0
 )
 
 var gasStaticExts = []string{
@@ -54,6 +73,8 @@ var gasStaticExts = []string{
 	".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".ico",
 	".mp3", ".mp4", ".webm", ".wasm", ".avif",
 }
+
+var gasJSONRegex = regexp.MustCompile(`\{.*\}`)
 
 type gasHostStat struct {
 	Requests       int
@@ -71,14 +92,19 @@ type gasRelay struct {
 	httpHost    string
 	scriptIDs   []string
 	scriptIdx   int
+	parallelNum int
 
 	authKey   string
 	verifySSL bool
 	relayTO   time.Duration
 	tlsTO     time.Duration
 
-	h2Mu     sync.Mutex
-	h2Client *http.Client
+	maxRespBody int
+
+	h2Mu          sync.Mutex
+	h2Client      *http.Client
+	h2FailCount   int
+	h2BackoffUntil time.Time
 
 	poolMu sync.Mutex
 	pool   []gasPooledConn
@@ -106,6 +132,10 @@ type gasRelay struct {
 	heartbeatStop chan struct{}
 	lastRelayOK   bool
 	relayFail     int
+
+	sidBlacklist  map[string]time.Time
+	blacklistTTL  time.Duration
+	devAvail      bool
 
 	closeMu sync.Mutex
 	closed  bool
@@ -147,6 +177,7 @@ func newGASRelay(cfg GASConfig) *gasRelay {
 		sniHosts:      fronts,
 		httpHost:      "script.google.com",
 		scriptIDs:     ids,
+		parallelNum:   gasParallelRelay,
 		authKey:       cfg.AuthKey,
 		verifySSL:     cfg.VerifySSL,
 		relayTO:       time.Duration(cfg.RelayTimeout) * time.Second,
@@ -156,6 +187,8 @@ func newGASRelay(cfg GASConfig) *gasRelay {
 		perSite:       map[string]*gasHostStat{},
 		statsStop:     make(chan struct{}),
 		heartbeatStop: make(chan struct{}),
+		sidBlacklist:  map[string]time.Time{},
+		blacklistTTL:  time.Duration(gasScriptBlacklistTTL * float64(time.Second)),
 	}
 	if cfg.RelayTimeout <= 0 {
 		r.relayTO = gasRelayTimeout * time.Second
@@ -163,8 +196,16 @@ func newGASRelay(cfg GASConfig) *gasRelay {
 	if cfg.TLSConnectTimeout <= 0 {
 		r.tlsTO = gasTLSConnectTimeout * time.Second
 	}
-	log.Printf("[GAS] Relay initialized: connect=%s front=%s ids=%d", cfg.GoogleIP, cfg.FrontDomain, len(ids))
+	if cfg.MaxResponseBody > 0 {
+		r.maxRespBody = int(cfg.MaxResponseBody)
+	} else {
+		r.maxRespBody = int(gasMaxRespBody)
+	}
+	relayLog.Infof("Relay initialized: connect=%s front=%s ids=%d maxBody=%d",
+		cfg.GoogleIP, cfg.FrontDomain, len(ids), r.maxRespBody)
 	go r.heartbeatLoop()
+	go r.statsLoop()
+	go r.warmUp()
 	return r
 }
 
@@ -205,10 +246,26 @@ func (r *gasRelay) nextSNI() string {
 	return r.sniHosts[int(idx)%len(r.sniHosts)]
 }
 
+func (r *gasRelay) h2BackoffLeft() time.Duration {
+	r.h2Mu.Lock()
+	defer r.h2Mu.Unlock()
+	if r.h2Client != nil {
+		return 0
+	}
+	left := time.Until(r.h2BackoffUntil)
+	if left < 0 {
+		return 0
+	}
+	return left
+}
+
 func (r *gasRelay) ensureH2() {
 	r.h2Mu.Lock()
 	defer r.h2Mu.Unlock()
 	if r.h2Client != nil {
+		return
+	}
+	if time.Now().Before(r.h2BackoffUntil) {
 		return
 	}
 	tr := &http2.Transport{
@@ -246,7 +303,7 @@ func (r *gasRelay) ensureH2() {
 		},
 	}
 	r.h2Client = &http.Client{Transport: tr}
-	log.Printf("[GAS] H2 transport ready -> %s", r.connectHost)
+	relayLog.Infof("H2 transport ready -> %s", r.connectHost)
 }
 
 func (r *gasRelay) resetH2() {
@@ -258,10 +315,26 @@ func (r *gasRelay) resetH2() {
 		}
 	}
 	r.h2Client = nil
+	r.h2FailCount++
+	backoff := time.Duration(1<<min(r.h2FailCount, 5)) * time.Second
+	if backoff > 30*time.Second {
+		backoff = 30 * time.Second
+	}
+	r.h2BackoffUntil = time.Now().Add(backoff)
+	h2Log.Warnf("Circuit breaker: backoff %v (fail #%d)", backoff, r.h2FailCount)
 }
 
 func (r *gasRelay) h2Request(ctx context.Context, method, path, host string, headers map[string]string, body []byte, timeout time.Duration) (int, map[string]string, []byte, error) {
+	if r.h2BackoffLeft() > 0 {
+		return 0, nil, nil, fmt.Errorf("H2 circuit breaker open (backoff %v)", r.h2BackoffLeft())
+	}
 	r.ensureH2()
+	r.h2Mu.Lock()
+	client := r.h2Client
+	r.h2Mu.Unlock()
+	if client == nil {
+		return 0, nil, nil, fmt.Errorf("H2 client not available (circuit breaker)")
+	}
 	tH2Start := time.Now()
 	if !strings.HasPrefix(path, "/") {
 		path = "/" + path
@@ -274,31 +347,29 @@ func (r *gasRelay) h2Request(ctx context.Context, method, path, host string, hea
 	for k, v := range headers {
 		req.Header.Set(k, v)
 	}
+	req.Header.Set("accept-encoding", gasCodecEncodings)
 	req.Host = host
 
 	ctx, cancel := context.WithTimeout(req.Context(), timeout)
 	defer cancel()
 	req = req.WithContext(ctx)
 
-	resp, err := r.h2Client.Do(req)
+	resp, err := client.Do(req)
 	dH2 := time.Since(tH2Start)
 	if err != nil {
-		log.Printf("[GAS-H2] %s %s failed after %v: %v", method, path, dH2, err)
+		h2Log.Errorf("%s %s failed after %v: %v", method, path, dH2, err)
 		r.resetH2()
-		// Retry once with a fresh H2 connection
-		r.ensureH2()
-		tRetry := time.Now()
-		resp, err = r.h2Client.Do(req)
-		if err != nil {
-			log.Printf("[GAS-H2] %s %s retry also failed after %v: %v", method, path, time.Since(tRetry), err)
-			return 0, nil, nil, err
-		}
-		log.Printf("[GAS-H2] %s %s recovered after retry", method, path)
+		return 0, nil, nil, err
 	}
+	// Success — reset circuit breaker
+	r.h2Mu.Lock()
+	r.h2FailCount = 0
+	r.h2BackoffUntil = time.Time{}
+	r.h2Mu.Unlock()
 	defer resp.Body.Close()
 
 	if dH2 > 3*time.Second {
-		log.Printf("[GAS-H2] %s %s slow response: %v (status=%d)", method, path, dH2, resp.StatusCode)
+		h2Log.Warnf("%s %s slow response: %v (status=%d)", method, path, dH2, resp.StatusCode)
 	}
 
 	data, err := io.ReadAll(resp.Body)
@@ -322,6 +393,15 @@ func (r *gasRelay) relayRequest(method, urlStr string, headers map[string]string
 	payload := r.buildPayload(method, urlStr, headers, body)
 	errored := false
 
+	// Estimate final payload size (with auth key)
+	if len(body) > 0 {
+		encodedSize := len(body) * 4 / 3
+		if encodedSize > gasMaxPayloadSize {
+			relayLog.Infof("Large request body %d bytes (encoded ~%d) for %s %s",
+				len(body), encodedSize, method, urlStr)
+		}
+	}
+
 	defer func() {
 		r.recordStats(urlStr, len(payload), start, errored)
 	}()
@@ -335,19 +415,67 @@ func (r *gasRelay) relayRequest(method, urlStr string, headers map[string]string
 		return resp
 	}
 
-	key := r.coalesceKey(urlStr, headers)
-	if strings.ToUpper(method) == "GET" && len(body) == 0 {
-		if v := headerValue(headers, "range"); v == "" {
-			if resp, ok := r.tryCoalesce(key, payload); ok {
+	// Skip batching for large payloads (file downloads, streams) to avoid GAS timeout
+	if len(body) > gasMaxPayloadSize/4 {
+		resp, err := r.relaySingle(payload)
+		if err != nil {
+			errored = true
+			return gasErrorResponse(502, err.Error())
+		}
+		dReq := time.Since(start)
+		if dReq > 10*time.Second {
+			relayLog.Warnf("relayRequest(single) %s %s took %v (errored=%v)", method, urlStr, dReq, err != nil)
+		}
+		return resp
+	}
+
+	// Chunked download for large file extensions with multiple script IDs
+	if strings.ToUpper(method) == "GET" && len(body) == 0 && len(r.scriptIDs) > 1 {
+		if v := headerValue(headers, "range"); v == "" && gasIsLargeFileExt(urlStr) {
+			if resp := r.relayChunked(payload, urlStr, headers); resp != nil {
 				return resp
 			}
 		}
 	}
 
+	// Use parallel fan-out for GET requests with multiple script IDs
+	useParallel := strings.ToUpper(method) == "GET" && len(body) == 0 && r.parallelNum > 1 && len(r.scriptIDs) > 1
+	if !useParallel {
+		key := r.coalesceKey(urlStr, headers)
+		if strings.ToUpper(method) == "GET" && len(body) == 0 {
+			if v := headerValue(headers, "range"); v == "" {
+				if resp, ok := r.tryCoalesce(key, payload); ok {
+					return resp
+				}
+			}
+		}
+		resp, err := r.batchSubmit(payload)
+		dReq := time.Since(start)
+		if dReq > 10*time.Second {
+			relayLog.Warnf("relayRequest %s %s took %v (errored=%v)", method, urlStr, dReq, err != nil)
+		}
+		if err != nil {
+			errored = true
+			return gasErrorResponse(502, err.Error())
+		}
+		return resp
+	}
+
+	key := r.coalesceKey(urlStr, headers)
+	if resp, ok := r.tryCoalesce(key, payload); ok {
+		return resp
+	}
+	if resp, pErr := r.relaySingleParallel(payload, r.parallelNum); pErr == nil {
+		return resp
+	} else {
+		relayLog.Infof("All parallel failed, falling back to batch: %v", pErr)
+	}
+	errored = true
+
 	resp, err := r.batchSubmit(payload)
 	dReq := time.Since(start)
 	if dReq > 10*time.Second {
-		log.Printf("[GAS-WATCHDOG] relayRequest %s %s took %v (errored=%v)", method, urlStr, dReq, err != nil)
+		relayLog.Warnf("relayRequest %s %s took %v (errored=%v)", method, urlStr, dReq, err != nil)
 	}
 	if err != nil {
 		errored = true
@@ -381,18 +509,170 @@ func (r *gasRelay) scriptIDForKey(key string) string {
 		}
 		return ""
 	}
-	if key == "" {
-		r.scriptIdx = (r.scriptIdx + 1) % len(r.scriptIDs)
-		return r.scriptIDs[r.scriptIdx]
+	for i := 0; i < len(r.scriptIDs); i++ {
+		var sid string
+		if key == "" {
+			r.scriptIdx = (r.scriptIdx + 1) % len(r.scriptIDs)
+			sid = r.scriptIDs[r.scriptIdx]
+		} else {
+			h := sha1.Sum([]byte(key))
+			idx := int(h[0]) % len(r.scriptIDs)
+			sid = r.scriptIDs[idx]
+		}
+		if _, blacklisted := r.sidBlacklist[sid]; !blacklisted {
+			return sid
+		}
+		// Check if blacklist has expired
+		if expiry, ok := r.sidBlacklist[sid]; ok && time.Now().After(expiry) {
+			delete(r.sidBlacklist, sid)
+			return sid
+		}
 	}
-	h := sha1.Sum([]byte(key))
-	idx := int(h[0]) % len(r.scriptIDs)
-	return r.scriptIDs[idx]
+	// All blacklisted — return the first one anyway
+	return r.scriptIDs[0]
 }
 
 func (r *gasRelay) execPath(urlOrHost any) string {
 	sid := r.scriptIDForKey(gasHostKey(fmt.Sprint(urlOrHost)))
+	if sid == "" {
+		return "/macros/s/dev"
+	}
+	if r.devAvail {
+		return "/macros/s/" + sid + "/dev"
+	}
 	return "/macros/s/" + sid + "/exec"
+}
+
+func gasIsLargeFileExt(urlStr string) bool {
+	lower := strings.ToLower(urlStr)
+	for ext := range gasLargeFileExts {
+		if strings.HasSuffix(lower, ext) {
+			return true
+		}
+	}
+	return false
+}
+
+// relayChunked downloads a large file in parallel chunks using multiple script IDs.
+func (r *gasRelay) relayChunked(payload map[string]any, urlStr string, headers map[string]string) []byte {
+	if len(r.scriptIDs) <= 1 {
+		return nil
+	}
+	headPayload := r.buildPayload("HEAD", urlStr, headers, nil)
+	headResp, err := r.relaySingle(headPayload)
+	if err != nil {
+		return nil
+	}
+	cl := gasParseContentLength(headResp)
+	if cl <= chunkedMinSize {
+		return nil
+	}
+	rangeVal := headerValue(headers, "range")
+	if rangeVal != "" {
+		return nil
+	}
+
+	numChunks := int((cl + chunkedChunkSize - 1) / chunkedChunkSize)
+	if numChunks > chunkedMaxParallel {
+		numChunks = chunkedMaxParallel
+	}
+	chunkSize := cl / int64(numChunks)
+	if chunkSize < chunkedChunkSize {
+		chunkSize = chunkedChunkSize
+		numChunks = int((cl + chunkSize - 1) / chunkSize)
+		if numChunks > chunkedMaxParallel {
+			numChunks = chunkedMaxParallel
+			chunkSize = cl / int64(numChunks)
+		}
+	}
+
+	type chunkResult struct {
+		data []byte
+		idx  int
+		err  error
+	}
+	ch := make(chan chunkResult, numChunks)
+
+	n := len(r.scriptIDs)
+	for i := 0; i < numChunks; i++ {
+		start := int64(i) * chunkSize
+		end := start + chunkSize - 1
+		if i == numChunks-1 {
+			end = cl - 1
+		}
+		rangeHdr := fmt.Sprintf("bytes=%d-%d", start, end)
+		chunkHeaders := make(map[string]string, len(headers)+1)
+		for k, v := range headers {
+			chunkHeaders[k] = v
+		}
+		chunkHeaders["range"] = rangeHdr
+
+		idx := (r.scriptIdx + i) % n
+		sid := r.scriptIDs[idx]
+		path := "/macros/s/" + sid + "/exec"
+		go func(p string, ci int) {
+			fullPayload := r.buildPayload("GET", urlStr, chunkHeaders, nil)
+			fullPayload["k"] = r.authKey
+			jsonBody, _ := json.Marshal(fullPayload)
+			resp, err := r.relayHTTP1(p, jsonBody)
+			if err != nil {
+				ch <- chunkResult{nil, ci, err}
+				return
+			}
+			parsed := r.parseRelayResponse(resp)
+			if gasResponseBytesIsError(parsed) {
+				ch <- chunkResult{nil, ci, fmt.Errorf("chunk %d error: relay error", ci)}
+				return
+			}
+			body := gasExtractBody(parsed)
+			ch <- chunkResult{body, ci, nil}
+		}(path, i)
+	}
+	r.scriptIdx = (r.scriptIdx + numChunks) % n
+
+	chunks := make([][]byte, numChunks)
+	for i := 0; i < numChunks; i++ {
+		res := <-ch
+		if res.err != nil {
+			relayLog.Infof("Chunk %d failed: %v", res.idx, res.err)
+			return nil
+		}
+		chunks[res.idx] = res.data
+	}
+
+	var full []byte
+	for _, c := range chunks {
+		full = append(full, c...)
+	}
+	relayLog.Infof("Assembled %d chunks (%d bytes) for %s", numChunks, len(full), urlStr)
+
+	statusLine := fmt.Sprintf("HTTP/1.1 200 OK\r\nContent-Length: %d\r\n", len(full))
+	if ct := headerValue(headers, "content-type"); ct != "" {
+		statusLine += fmt.Sprintf("Content-Type: %s\r\n", ct)
+	}
+	statusLine += "\r\n"
+	return append([]byte(statusLine), full...)
+}
+
+func gasParseContentLength(resp []byte) int64 {
+	text := string(resp)
+	for _, line := range strings.Split(text, "\r\n") {
+		lower := strings.ToLower(line)
+		if strings.HasPrefix(lower, "content-length:") {
+			val := strings.TrimSpace(strings.TrimPrefix(line[16:], " "))
+			n, _ := strconv.ParseInt(val, 10, 64)
+			return n
+		}
+	}
+	return 0
+}
+
+func gasExtractBody(resp []byte) []byte {
+	idx := bytes.Index(resp, []byte("\r\n\r\n"))
+	if idx < 0 {
+		return nil
+	}
+	return resp[idx+4:]
 }
 
 func gasHostKey(urlOrHost string) string {
@@ -408,6 +688,32 @@ func gasHostKey(urlOrHost string) string {
 	return strings.ToLower(strings.TrimSuffix(urlOrHost, "."))
 }
 
+func (r *gasRelay) retryWithNextScript(path string) string {
+	if len(r.scriptIDs) <= 1 {
+		return path
+	}
+	// Cycle to next script ID
+	r.scriptIdx = (r.scriptIdx + 1) % len(r.scriptIDs)
+	sid := r.scriptIDs[r.scriptIdx]
+	newPath := "/macros/s/" + sid + "/exec"
+	relayLog.Warnf("Switching to script %s...", sid[:min(8, len(sid))])
+	return newPath
+}
+
+func (r *gasRelay) blacklistSID(path string) {
+	if len(r.scriptIDs) <= 1 {
+		return
+	}
+	for _, sid := range r.scriptIDs {
+		if strings.Contains(path, sid) {
+			r.blacklistTTL = time.Duration(gasScriptBlacklistTTL * float64(time.Second))
+			r.sidBlacklist[sid] = time.Now().Add(r.blacklistTTL)
+			relayLog.Warnf("Script %s blacklisted for %v", sid[:min(8, len(sid))], r.blacklistTTL)
+			return
+		}
+	}
+}
+
 func (r *gasRelay) relaySingle(payload map[string]any) ([]byte, error) {
 	full := map[string]any{}
 	for k, v := range payload {
@@ -415,19 +721,117 @@ func (r *gasRelay) relaySingle(payload map[string]any) ([]byte, error) {
 	}
 	full["k"] = r.authKey
 	jsonBody, _ := json.Marshal(full)
+
+	// Log warning for large payloads
+	if len(jsonBody) > gasMaxPayloadSize {
+		relayLog.Infof("Large payload %d bytes for %v", len(jsonBody), payload["u"])
+	}
+
 	path := r.execPath(payload["u"])
 
 	_, _, body, err := r.h2Request(context.Background(), "POST", path, r.httpHost,
 		map[string]string{"content-type": "application/json"}, jsonBody, r.relayTO)
 	if err == nil {
-		return r.parseRelayResponse(body), nil
+		resp := r.parseRelayResponse(body)
+		if !gasResponseBytesIsError(resp) {
+			return resp, nil
+		}
+		// Error response — blacklist this script ID and retry
+		relayLog.Warnf("relaySingle got error, retrying with different script")
+		r.blacklistSID(path)
+		path = r.retryWithNextScript(path)
+		r.resetH2()
+		_, _, body, err = r.h2Request(context.Background(), "POST", path, r.httpHost,
+			map[string]string{"content-type": "application/json"}, jsonBody, r.relayTO)
+		if err == nil {
+			return r.parseRelayResponse(body), nil
+		}
 	}
 
 	resp, err := r.relayHTTP1(path, jsonBody)
 	if err != nil {
+		r.blacklistSID(path)
 		return nil, err
 	}
-	return r.parseRelayResponse(resp), nil
+	parsed := r.parseRelayResponse(resp)
+	if gasResponseBytesIsError(parsed) {
+		// Retry HTTP/1.1 with next script
+		relayLog.Warnf("relayHTTP1 got error, retrying with different script")
+		r.blacklistSID(path)
+		path = r.retryWithNextScript(path)
+		resp, err = r.relayHTTP1(path, jsonBody)
+		if err != nil {
+			return nil, err
+		}
+		return r.parseRelayResponse(resp), nil
+	}
+	return parsed, nil
+}
+
+// relaySingleParallel sends the request to multiple script IDs simultaneously
+// and returns the first successful response. Falls back to relaySingle if only one script.
+func (r *gasRelay) relaySingleParallel(payload map[string]any, numParallel int) ([]byte, error) {
+	if len(r.scriptIDs) <= 1 || numParallel <= 1 {
+		return r.relaySingle(payload)
+	}
+	if numParallel > len(r.scriptIDs) {
+		numParallel = len(r.scriptIDs)
+	}
+
+	full := map[string]any{}
+	for k, v := range payload {
+		full[k] = v
+	}
+	full["k"] = r.authKey
+	jsonBody, _ := json.Marshal(full)
+
+	if len(jsonBody) > gasMaxPayloadSize {
+		relayLog.Infof("Large payload %d bytes for %v", len(jsonBody), payload["u"])
+	}
+
+	type parResult struct {
+		resp []byte
+		err  error
+	}
+	resultCh := make(chan parResult, numParallel)
+
+	n := len(r.scriptIDs)
+	r.scriptIdx = (r.scriptIdx + 1) % n
+	for i := 0; i < numParallel; i++ {
+		idx := (r.scriptIdx + i) % n
+		sid := r.scriptIDs[idx]
+		path := "/macros/s/" + sid + "/exec"
+		go func(p string) {
+			resp, err := r.relayHTTP1(p, jsonBody)
+			if err != nil {
+				resultCh <- parResult{nil, err}
+				return
+			}
+			parsed := r.parseRelayResponse(resp)
+			if gasResponseBytesIsError(parsed) {
+				p2 := r.retryWithNextScript(p)
+				resp2, err2 := r.relayHTTP1(p2, jsonBody)
+				if err2 != nil {
+					resultCh <- parResult{nil, err2}
+					return
+				}
+				resultCh <- parResult{r.parseRelayResponse(resp2), nil}
+				return
+			}
+			resultCh <- parResult{parsed, nil}
+		}(path)
+	}
+	r.scriptIdx = (r.scriptIdx + numParallel) % n
+
+	var lastErr error
+	for i := 0; i < numParallel; i++ {
+		res := <-resultCh
+		if res.err == nil {
+			return res.resp, nil
+		}
+		lastErr = res.err
+	}
+	return nil, lastErr
 }
 
 func (r *gasRelay) batchSubmit(payload map[string]any) ([]byte, error) {
@@ -494,12 +898,33 @@ func (r *gasRelay) relayBatch(batch []gasBatchItem) ([][]byte, error) {
 		"q": payloads,
 	}
 	jsonBody, _ := json.Marshal(full)
+
+	if len(jsonBody) > gasMaxPayloadSize {
+		relayLog.Infof("Large batch payload %d bytes for %d items (consider increasing script count)",
+			len(jsonBody), len(batch))
+	}
+
 	path := r.execPath(payloads[0]["u"])
 
 	_, _, body, err := r.h2Request(context.Background(), "POST", path, r.httpHost,
 		map[string]string{"content-type": "application/json"}, jsonBody, 30*time.Second)
 	if err == nil {
-		return r.parseBatchBody(body, len(batch))
+		results, parseErr := r.parseBatchBody(body, len(batch))
+		if parseErr == nil {
+			return results, nil
+		}
+		// Try with next script ID
+		relayLog.Warnf("relayBatch parse error: %v — retrying with different script", parseErr)
+		path = r.retryWithNextScript(path)
+		_, _, body, err = r.h2Request(context.Background(), "POST", path, r.httpHost,
+			map[string]string{"content-type": "application/json"}, jsonBody, 30*time.Second)
+		if err == nil {
+			results, parseErr = r.parseBatchBody(body, len(batch))
+			if parseErr == nil {
+				return results, nil
+			}
+			return nil, parseErr
+		}
 	}
 	resp, err := r.relayHTTP1(path, jsonBody)
 	if err != nil {
@@ -512,7 +937,7 @@ func (r *gasRelay) relayHTTP1(path string, body []byte) ([]byte, error) {
 	tHTTP1 := time.Now()
 	conn, err := r.acquireConn()
 	if err != nil {
-		log.Printf("[GAS-H1] acquireConn failed for %s: %v", path, err)
+		h1Log.Infof("acquireConn failed for %s: %v", path, err)
 		return nil, err
 	}
 	released := false
@@ -522,77 +947,69 @@ func (r *gasRelay) relayHTTP1(path string, body []byte) ([]byte, error) {
 		}
 	}()
 
-	req := fmt.Sprintf("POST %s HTTP/1.1\r\nHost: %s\r\nContent-Type: application/json\r\nContent-Length: %d\r\nAccept-Encoding: gzip\r\nConnection: keep-alive\r\n\r\n", path, r.httpHost, len(body))
-	if _, err := conn.Write([]byte(req)); err != nil {
+	header := []byte(fmt.Sprintf("POST %s HTTP/1.1\r\nHost: %s\r\nContent-Type: application/json\r\nContent-Length: %d\r\nAccept-Encoding: gzip\r\nConnection: keep-alive\r\n\r\n", path, r.httpHost, len(body)))
+	req := append(header, body...)
+
+	_, err = conn.Write(req)
+	if err != nil {
 		_ = conn.Close()
-		// Retry once with a fresh connection
-		log.Printf("[GAS-H1] write failed for %s: %v — retrying with new connection", path, err)
+		h1Log.Infof("write failed for %s: %v — retrying with new connection", path, err)
 		conn, err = r.acquireConn()
 		if err != nil {
 			return nil, err
 		}
-		if _, err := conn.Write([]byte(req)); err != nil {
+		_, err = conn.Write(req)
+		if err != nil {
 			_ = conn.Close()
 			return nil, err
-		}
-		if _, err := conn.Write(body); err != nil {
-			_ = conn.Close()
-			return nil, err
-		}
-	} else {
-		if _, err := conn.Write(body); err != nil {
-			_ = conn.Close()
-			conn, err = r.acquireConn()
-			if err != nil {
-				return nil, err
-			}
-			// Re-send full request on new connection
-			if _, err := conn.Write([]byte(req)); err != nil {
-				_ = conn.Close()
-				return nil, err
-			}
-			if _, err := conn.Write(body); err != nil {
-				_ = conn.Close()
-				return nil, err
-			}
 		}
 	}
 
-	status, _, respBody, err := gasReadHTTPResponse(conn, gasMaxRespBody)
+	status, respHeaders, respBody, err := gasReadHTTPResponse(conn, r.maxRespBody)
 	if err != nil {
 		_ = conn.Close()
-		// Retry once with fresh connection
-		log.Printf("[GAS-H1] read failed for %s: %v — retrying with new connection", path, err)
+		h1Log.Infof("read failed for %s: %v — retrying with new connection", path, err)
 		conn2, err2 := r.acquireConn()
 		if err2 != nil {
 			return nil, err2
 		}
-		if _, err2 := conn2.Write([]byte(req)); err2 != nil {
+		_, err2 = conn2.Write(req)
+		if err2 != nil {
 			_ = conn2.Close()
 			return nil, err2
 		}
-		if _, err2 := conn2.Write(body); err2 != nil {
-			_ = conn2.Close()
-			return nil, err2
-		}
-		status, _, respBody, err = gasReadHTTPResponse(conn2, gasMaxRespBody)
+		var h2 map[string]string
+		status, h2, respBody, err = gasReadHTTPResponse(conn2, r.maxRespBody)
 		if err != nil {
 			_ = conn2.Close()
 			return nil, err
 		}
+		respHeaders = h2
 		conn = conn2
 	}
 	r.releaseConn(conn)
 	released = true
 
 	if status >= 300 && status < 400 {
+		loc := respHeaders["location"]
+		if loc != "" {
+			parsed, parseErr := url.Parse(loc)
+			if parseErr == nil {
+				rpath := parsed.Path
+				if parsed.RawQuery != "" {
+					rpath += "?" + parsed.RawQuery
+				}
+				h1Log.Infof("Following redirect %d: %s -> %s", status, path, rpath)
+				return r.relayHTTP1(rpath, body)
+			}
+		}
 		return nil, fmt.Errorf("unexpected redirect: %d", status)
 	}
 	dH1 := time.Since(tHTTP1)
 	if dH1 > 3*time.Second {
-		log.Printf("[GAS-H1] slow: %s took %v (status=%d)", path, dH1, status)
+		h1Log.Infof("slow: %s took %v (status=%d)", path, dH1, status)
 	}
-	log.Printf("[GAS-H1] %s: %v (status=%d)", path, dH1, status)
+	h1Log.Infof("%s: %v (status=%d)", path, dH1, status)
 	return respBody, nil
 }
 
@@ -603,6 +1020,14 @@ func (r *gasRelay) acquireConn() (net.Conn, error) {
 		r.pool = r.pool[:len(r.pool)-1]
 		if time.Since(pc.created) < time.Duration(gasConnTTL*float64(time.Second)) {
 			r.poolMu.Unlock()
+			// Quick keep-alive check: set a 2-second peek deadline
+			_ = pc.conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+			n, _ := pc.conn.Read(make([]byte, 1))
+			_ = pc.conn.SetReadDeadline(time.Time{})
+			if n > 0 {
+				_ = pc.conn.Close()
+				break
+			}
 			return pc.conn, nil
 		}
 		_ = pc.conn.Close()
@@ -723,14 +1148,33 @@ func (r *gasRelay) coalesceKey(urlStr string, headers map[string]string) string 
 	return strings.Join(key, "\n")
 }
 
+func gasLooksLikeHTMLError(body []byte) bool {
+	if len(body) < 50 {
+		return false
+	}
+	trimmed := strings.TrimSpace(strings.ToLower(string(body)))
+	return strings.Contains(trimmed, "<html") &&
+		(strings.Contains(trimmed, "error") ||
+			strings.Contains(trimmed, "try again") ||
+			strings.Contains(trimmed, "timeout") ||
+			strings.Contains(trimmed, "unavailable"))
+}
+
+func gasResponseBytesIsError(resp []byte) bool {
+	return len(resp) > 0 && (bytes.HasPrefix(resp, []byte("HTTP/1.1 502")) || bytes.HasPrefix(resp, []byte("HTTP/1.1 503")))
+}
+
 func (r *gasRelay) parseRelayResponse(body []byte) []byte {
 	text := strings.TrimSpace(string(body))
 	if text == "" {
 		return gasErrorResponse(502, "Empty response from relay")
 	}
+	if gasLooksLikeHTMLError(body) {
+		return gasErrorResponse(502, "GAS HTML error: "+gasTruncate(text, 200))
+	}
 	var data map[string]any
 	if err := json.Unmarshal([]byte(text), &data); err != nil {
-		m := regexp.MustCompile(`\{.*\}`).FindString(text)
+		m := gasJSONRegex.FindString(text)
 		if m == "" {
 			return gasErrorResponse(502, "No JSON: "+gasTruncate(text, 200))
 		}
@@ -754,9 +1198,12 @@ func (r *gasRelay) parseRelayJSON(data map[string]any) []byte {
 	if b, ok := data["b"].(string); ok {
 		bodyRaw = b
 	}
-	decodedBody, _ := base64.StdEncoding.DecodeString(bodyRaw)
-	if len(decodedBody) > gasMaxRespBody {
-		return gasErrorResponse(502, "Relay response exceeds cap")
+	decodedBody, err := base64.StdEncoding.DecodeString(bodyRaw)
+	if err != nil {
+		return gasErrorResponse(502, "Relay base64 decode error: "+err.Error())
+	}
+	if len(decodedBody) > r.maxRespBody {
+		return gasErrorResponse(502, "Relay response exceeds cap ("+humanSize(r.maxRespBody)+")")
 	}
 
 	statusText := "OK"
@@ -808,6 +1255,9 @@ func (r *gasRelay) parseRelayJSON(data map[string]any) []byte {
 
 func (r *gasRelay) parseBatchBody(body []byte, expected int) ([][]byte, error) {
 	text := strings.TrimSpace(string(body))
+	if gasLooksLikeHTMLError(body) {
+		return nil, fmt.Errorf("batch HTML error: %s", gasTruncate(text, 200))
+	}
 	var data map[string]any
 	if err := json.Unmarshal([]byte(text), &data); err != nil {
 		return nil, err
@@ -868,8 +1318,72 @@ func (r *gasRelay) recordCacheMiss() {
 	atomic.AddInt64(&r.cacheMisses, 1)
 }
 
+func (r *gasRelay) statsLoop() {
+	ticker := time.NewTicker(gasStatsLogInterval * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-r.statsStop:
+			return
+		case <-ticker.C:
+			r.logStats()
+		}
+	}
+}
+
+func (r *gasRelay) logStats() {
+	r.statsMu.RLock()
+	count := len(r.perSite)
+	if count == 0 {
+		r.statsMu.RUnlock()
+		return
+	}
+	entries := make([]struct {
+		host string
+		stat *gasHostStat
+	}, 0, count)
+	for host, stat := range r.perSite {
+		entries = append(entries, struct {
+			host string
+			stat *gasHostStat
+		}{host: host, stat: stat})
+	}
+	r.statsMu.RUnlock()
+
+	sort.Slice(entries, func(i, j int) bool {
+		return entries[i].stat.Bytes > entries[j].stat.Bytes
+	})
+	n := gasStatsLogTopN
+	if n > len(entries) {
+		n = len(entries)
+	}
+	statsLog.Infof("Per-host stats (top %d by bytes, %d total hosts):", n, count)
+	for i := 0; i < n; i++ {
+		e := entries[i]
+		avgLatency := time.Duration(0)
+		if e.stat.Requests > 0 {
+			avgLatency = time.Duration(e.stat.TotalLatencyNs / int64(e.stat.Requests))
+		}
+		statsLog.Infof("  %s: %d reqs, %.2fMB, %s avg, %d errs",
+			e.host, e.stat.Requests, float64(e.stat.Bytes)/1024/1024, avgLatency, e.stat.Errors)
+	}
+}
+
+func (r *gasRelay) warmUp() {
+	relayLog.Infof("Starting warm-up...")
+	// Force H2 client creation and pre-warm with quick pings
+	for i := 0; i < 2; i++ {
+		if i > 0 {
+			time.Sleep(500 * time.Millisecond)
+		}
+		r.pingRelay()
+		r.nextSNI()
+	}
+	relayLog.Infof("Warm-up complete")
+}
+
 func (r *gasRelay) heartbeatLoop() {
-	ticker := time.NewTicker(30 * time.Second)
+	ticker := time.NewTicker(60 * time.Second)
 	defer ticker.Stop()
 	for {
 		select {
@@ -896,10 +1410,15 @@ func (r *gasRelay) pingRelay() {
 
 	if err != nil {
 		r.relayFail++
-		log.Printf("[GAS-HEARTBEAT] FAIL after %v: %v (consecutive=%d)", d, err, r.relayFail)
+		relayLog.Infof("FAIL after %v: %v (consecutive=%d)", d, err, r.relayFail)
 		r.lastRelayOK = false
+		if r.relayFail >= 5 {
+			relayLog.Infof("CRITICAL: %d consecutive failures — full relay restart", r.relayFail)
+			r.restart()
+			return
+		}
 		if r.relayFail >= 3 {
-			log.Printf("[GAS-HEARTBEAT] CRITICAL: %d consecutive relay failures!", r.relayFail)
+			relayLog.Infof("WARNING: %d consecutive relay failures", r.relayFail)
 		}
 		r.resetH2()
 		return
@@ -909,10 +1428,10 @@ func (r *gasRelay) pingRelay() {
 	r.relayFail = 0
 	parsed := r.parseRelayResponse(resp)
 	if len(parsed) == 0 {
-		log.Printf("[GAS-HEARTBEAT] OK (%v) but empty response", d)
+		relayLog.Infof("OK (%v) but empty response", d)
 		return
 	}
-	log.Printf("[GAS-HEARTBEAT] OK (%v)", d)
+	relayLog.Infof("OK (%v)", d)
 }
 
 func (r *gasRelay) close() {
@@ -941,6 +1460,44 @@ func (r *gasRelay) close() {
 	}
 	r.pool = nil
 	r.poolMu.Unlock()
+
+	r.sidBlacklist = map[string]time.Time{}
+}
+
+func (r *gasRelay) restart() {
+	relayLog.Infof("Full restart initiated...")
+
+	r.h2Mu.Lock()
+	if r.h2Client != nil {
+		if tr, ok := r.h2Client.Transport.(*http2.Transport); ok {
+			tr.CloseIdleConnections()
+		}
+	}
+	r.h2Client = nil
+	r.h2FailCount = 0
+	r.h2BackoffUntil = time.Time{}
+	r.h2Mu.Unlock()
+
+	r.poolMu.Lock()
+	for _, pc := range r.pool {
+		_ = pc.conn.Close()
+	}
+	r.pool = nil
+	r.poolMu.Unlock()
+
+	r.batchMu.Lock()
+	r.batchPending = nil
+	if r.batchTimer != nil {
+		r.batchTimer.Stop()
+		r.batchTimer = nil
+	}
+	r.batchMu.Unlock()
+
+	r.relayFail = 0
+	r.lastRelayOK = false
+	r.sidBlacklist = map[string]time.Time{}
+
+	relayLog.Infof("Full restart complete")
 }
 
 func newGASCache(maxMB int) *gasResponseCache {
@@ -1193,6 +1750,19 @@ func gasIntVal(v any, def int) int {
 	return def
 }
 
+func humanSize(bytes int) string {
+	const unit = 1024
+	if bytes < unit {
+		return fmt.Sprintf("%d B", bytes)
+	}
+	div, exp := int64(unit), 0
+	for n := bytes / unit; n >= unit; n /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f %cB", float64(bytes)/float64(div), "KMGTPE"[exp])
+}
+
 func headerValue(headers map[string]string, name string) string {
 	for k, v := range headers {
 		if strings.ToLower(k) == name {
@@ -1368,30 +1938,30 @@ func newGASProxyServer(cfg GASConfig, relay *gasRelay, certGen CertGenerator) *g
 	}
 	mitm := newGASMITMManager()
 
-	log.Printf("[GAS-MITM] newGASProxyServer: certGen=%v", certGen != nil)
+	mitmLog.Infof("newGASProxyServer: certGen=%v", certGen != nil)
 
 	// If Nova's CA is available, use it (so user installs only one root CA)
 	if certGen != nil {
 		caCert := certGen.GetCACert()
 		caKey := certGen.GetCAKey()
-		log.Printf("[GAS-MITM] certGen: caCert=%v caKey=%v", caCert != nil, caKey != nil)
+		mitmLog.Infof("certGen: caCert=%v caKey=%v", caCert != nil, caKey != nil)
 
 		if caCert != nil && caKey != nil {
-			log.Printf("[GAS-MITM] Nova CA CN: %s", caCert.Subject.CommonName)
+			mitmLog.Infof("Nova CA CN: %s", caCert.Subject.CommonName)
 
 			if signer, ok := caKey.(crypto.Signer); ok {
-				log.Printf("[GAS-MITM] CA key type: %T - using Nova CA for GAS MITM", caKey)
+				mitmLog.Infof("CA key type: %T - using Nova CA for GAS MITM", caKey)
 				mitm.useCA(caCert, signer)
 			} else {
-				log.Printf("[GAS-MITM] WARNING: CA key type %T does not implement crypto.Signer - GAS will use its own self-generated CA!", caKey)
-				log.Printf("[GAS-MITM] This will cause TLS handshake failures unless you also install GAS's CA certificate.")
+				mitmLog.Infof("WARNING: CA key type %T does not implement crypto.Signer - GAS will use its own self-generated CA!", caKey)
+				mitmLog.Infof("This will cause TLS handshake failures unless you also install GAS's CA certificate.")
 			}
 		}
 	} else {
-		log.Printf("[GAS-MITM] WARNING: certGen is nil - GAS will use its own self-generated CA!")
+		mitmLog.Infof("WARNING: certGen is nil - GAS will use its own self-generated CA!")
 	}
 
-	log.Printf("[GAS-MITM] GAS MITM CA CN: %s", mitm.caCert.Subject.CommonName)
+	mitmLog.Infof("GAS MITM CA CN: %s", mitm.caCert.Subject.CommonName)
 
 	return &gasProxyServer{
 		relay:   relay,
@@ -1410,7 +1980,7 @@ func (s *gasProxyServer) start() error {
 		return fmt.Errorf("gas listen failed: %w", err)
 	}
 	s.listener = ln
-	log.Printf("[GAS] HTTP proxy listening on %s:%d", s.host, s.port)
+	relayLog.Infof("HTTP proxy listening on %s:%d", s.host, s.port)
 
 	close(s.started)
 	s.wg.Add(1)
@@ -1447,7 +2017,7 @@ func (s *gasProxyServer) acceptLoop(ln net.Listener, handler func(net.Conn)) {
 			defer s.wg.Done()
 			defer func() {
 				if r := recover(); r != nil {
-					log.Printf("[GAS-PANIC] handler recovered: %v", r)
+					relayLog.Errorf("handler recovered: %v", r)
 				}
 			}()
 			handler(conn)
@@ -1462,6 +2032,7 @@ func (s *gasProxyServer) handleHTTP(conn net.Conn) {
 	reader := bufio.NewReaderSize(conn, 4096)
 	line, err := reader.ReadString('\n')
 	if err != nil {
+		_, _ = conn.Write([]byte("HTTP/1.1 400 Bad Request\r\n\r\n"))
 		return
 	}
 
@@ -1471,11 +2042,13 @@ func (s *gasProxyServer) handleHTTP(conn net.Conn) {
 	for {
 		ln, err := reader.ReadString('\n')
 		if err != nil {
+			_, _ = conn.Write([]byte("HTTP/1.1 400 Bad Request\r\n\r\n"))
 			return
 		}
 		headers = append(headers, ln)
 		totalLen += len(ln)
 		if totalLen > 65536 {
+			_, _ = conn.Write([]byte("HTTP/1.1 413 Request Entity Too Large\r\n\r\n"))
 			return
 		}
 		if ln == "\r\n" || ln == "\n" {
@@ -1485,6 +2058,7 @@ func (s *gasProxyServer) handleHTTP(conn net.Conn) {
 
 	parts := strings.SplitN(strings.TrimSpace(line), " ", 3)
 	if len(parts) < 2 {
+		_, _ = conn.Write([]byte("HTTP/1.1 400 Bad Request\r\n\r\n"))
 		return
 	}
 	method := strings.ToUpper(parts[0])
@@ -1575,7 +2149,7 @@ func gasNeedsSNIRewrite(host string) bool {
 func gasTraceHost(host, urlStr, method string) {
 	for _, suffix := range gasTraceHostSuffixes {
 		if strings.Contains(host, suffix) {
-			log.Printf("[GAS-TRACE] %s %s (host=%s)", method, urlStr, host)
+			relayLog.Debugf("%s %s (host=%s)", method, urlStr, host)
 			return
 		}
 	}
@@ -1597,7 +2171,7 @@ func (s *gasProxyServer) handleCONNECT(conn net.Conn, reader *bufio.Reader, targ
 		t0 := time.Now()
 		tlsCert, err := s.mitm.getCert(host)
 		if err != nil {
-			log.Printf("[GAS] getCert failed for %s: %v", host, err)
+			relayLog.Infof("getCert failed for %s: %v", host, err)
 			_, _ = conn.Write([]byte("HTTP/1.1 502 Bad Gateway\r\n\r\n"))
 			return
 		}
@@ -1606,7 +2180,7 @@ func (s *gasProxyServer) handleCONNECT(conn net.Conn, reader *bufio.Reader, targ
 		sni := host
 		if gasNeedsSNIRewrite(host) {
 			sni = s.relay.sniHost
-			log.Printf("[GAS] SNI rewrite for %s -> %s", host, sni)
+			relayLog.Infof("SNI rewrite for %s -> %s", host, sni)
 		}
 
 		tlsCfg := &tls.Config{
@@ -1617,12 +2191,12 @@ func (s *gasProxyServer) handleCONNECT(conn net.Conn, reader *bufio.Reader, targ
 		t1 := time.Now()
 		tlsConn := tls.Server(conn, tlsCfg)
 		if err := tlsConn.Handshake(); err != nil {
-			log.Printf("[GAS] TLS handshake failed for %s: %v (getCert=%v) - falling back to raw TCP", host, err, dCert)
+			relayLog.Infof("TLS handshake failed for %s: %v (getCert=%v) - falling back to raw TCP", host, err, dCert)
 			_ = conn.SetDeadline(time.Time{})
 			s.relayRawTCP(host, port, conn)
 			return
 		}
-		log.Printf("[GAS] CONNECT %s (getCert=%v, TLS=%v)", host, dCert, time.Since(t1))
+		relayLog.Infof("CONNECT %s (getCert=%v, TLS=%v)", host, dCert, time.Since(t1))
 		s.relayHTTPOverTLS(host, port, tlsConn)
 		return
 	}
@@ -1635,7 +2209,7 @@ func (s *gasProxyServer) handleCONNECT(conn net.Conn, reader *bufio.Reader, targ
 func (s *gasProxyServer) relayRawTCP(host string, port int, client net.Conn) {
 	dst, err := net.DialTimeout("tcp", net.JoinHostPort(host, strconv.Itoa(port)), 15*time.Second)
 	if err != nil {
-		log.Printf("[GAS] raw TCP dial failed for %s:%d: %v", host, port, err)
+		relayLog.Infof("raw TCP dial failed for %s:%d: %v", host, port, err)
 		return
 	}
 	defer dst.Close()
@@ -1645,12 +2219,12 @@ func (s *gasProxyServer) relayRawTCP(host string, port int, client net.Conn) {
 	go func() {
 		defer wg.Done()
 		n, err := io.Copy(dst, client)
-		log.Printf("[GAS] raw TCP client->dst %s:%d: %d bytes, err=%v", host, port, n, err)
+		relayLog.Infof("raw TCP client->dst %s:%d: %d bytes, err=%v", host, port, n, err)
 	}()
 	go func() {
 		defer wg.Done()
 		n, err := io.Copy(client, dst)
-		log.Printf("[GAS] raw TCP dst->client %s:%d: %d bytes, err=%v", host, port, n, err)
+		relayLog.Infof("raw TCP dst->client %s:%d: %d bytes, err=%v", host, port, n, err)
 	}()
 	wg.Wait()
 }
@@ -1702,7 +2276,7 @@ func (s *gasProxyServer) relayHTTPOverTLS(host string, port int, conn net.Conn) 
 		response := s.relay.relayRequest(method, urlStr, headerMap, body)
 		dReq := time.Since(tReq)
 		if dReq > 5*time.Second {
-			log.Printf("[GAS] SLOW relay: %s %s took %v", method, urlStr, dReq)
+			relayLog.Infof("SLOW relay: %s %s took %v", method, urlStr, dReq)
 		}
 		if origin != "" {
 			response = gasInjectCORS(response, origin)

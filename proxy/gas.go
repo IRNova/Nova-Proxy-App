@@ -3,10 +3,11 @@ package proxy
 import (
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
+	"encoding/pem"
 	"fmt"
 	"io"
-	"log"
 	"net"
 	"net/http"
 	"net/url"
@@ -15,7 +16,11 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"novaproxy/logging"
 )
+
+var gasLog = logging.Get("GAS")
 
 type GASConfig struct {
 	ScriptID          string   `json:"script_id"`
@@ -75,17 +80,38 @@ type GASManager struct {
 	proxyServer *gasProxyServer
 	cancel      context.CancelFunc
 	stopCh      chan struct{}
+	wg          *sync.WaitGroup
 	statsTicker *time.Ticker
 	certGen     CertGenerator
 
 	failoverStop chan struct{}
 	rotateStop   chan struct{}
+
+	// standaloneProxy controls whether Start() also launches the separate gasProxyServer.
+	// When false (MHR-style one-port mode), only the relay is created, and the caller
+	// injects it into the main ProxyServer via GetRelay().
+	standaloneProxy bool
+}
+
+// SetStandaloneProxy controls whether GASManager starts a separate proxy server.
+// Set to false for MHR-style one-port operation (relay injected into main proxy).
+func (m *GASManager) SetStandaloneProxy(enabled bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.standaloneProxy = enabled
 }
 
 func (m *GASManager) SetCertGenerator(cg CertGenerator) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.certGen = cg
+}
+
+// GetRelay returns the active gasRelay engine, or nil if GAS is not running.
+func (m *GASManager) GetRelay() *gasRelay {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.relay
 }
 
 var googleScanDomains = []string{
@@ -102,7 +128,7 @@ func NewGASManager(configDir string) *GASManager {
 			AuthKey:           "changeme",
 			GoogleIP:          "216.239.38.120",
 			FrontDomain:       "www.google.com",
-			FrontDomains:      []string{"www.google.com", "www.youtube.com", "mail.google.com", "drive.google.com"},
+			FrontDomains:      []string{"www.google.com", "mail.google.com", "accounts.google.com", "gstatic.com"},
 			ListenPort:        8085,
 			ListenHost:        "127.0.0.1",
 			LANSharing:        false,
@@ -120,7 +146,7 @@ func NewGASManager(configDir string) *GASManager {
 			ProxyAppList:        []string{},
 		},
 	}
-	log.Printf("[GAS] Manager initialized, config path: %s", m.configPath)
+	gasLog.Infof("Manager initialized, config path: %s", m.configPath)
 	return m
 }
 
@@ -131,7 +157,7 @@ func (m *GASManager) LoadConfig() error {
 	data, err := os.ReadFile(m.configPath)
 	if err != nil {
 		if os.IsNotExist(err) {
-			log.Printf("[GAS] Config file not found, creating default at %s", m.configPath)
+			gasLog.Infof("Config file not found, creating default at %s", m.configPath)
 			return m.saveConfigLocked()
 		}
 		return err
@@ -139,7 +165,7 @@ func (m *GASManager) LoadConfig() error {
 
 	var cfg GASConfig
 	if err := json.Unmarshal(data, &cfg); err != nil {
-		log.Printf("[GAS] Failed to parse config: %v", err)
+		gasLog.Errorf("Failed to parse config: %v", err)
 		return err
 	}
 
@@ -147,7 +173,7 @@ func (m *GASManager) LoadConfig() error {
 	cfg.Running = running
 
 	m.config = cfg
-	log.Printf("[GAS] Config loaded: google_ip=%s front_domain=%s listen=%s:%d",
+	gasLog.Infof("Config loaded: google_ip=%s front_domain=%s listen=%s:%d",
 		m.config.GoogleIP, m.config.FrontDomain, m.config.ListenHost, m.config.ListenPort)
 	return nil
 }
@@ -167,7 +193,7 @@ func (m *GASManager) saveConfigLocked() error {
 func (m *GASManager) SaveConfig() error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	log.Printf("[GAS] Saving config")
+	gasLog.Infof("Saving config")
 	return m.saveConfigLocked()
 }
 
@@ -183,9 +209,65 @@ func (m *GASManager) UpdateConfig(cfg GASConfig) error {
 	m.config = cfg
 	err := m.saveConfigLocked()
 	m.mu.Unlock()
-	log.Printf("[GAS] Config updated: google_ip=%s front_domain=%s script_id=%s",
+	gasLog.Infof("Config updated: google_ip=%s front_domain=%s script_id=%s",
 		cfg.GoogleIP, cfg.FrontDomain, cfg.ScriptID)
 	return err
+}
+
+// fallbackCertGenerator loads Nova's CA from disk when no CertGenerator was provided.
+// This prevents GAS from generating its own separate CA (which would require installing TWO root CAs).
+type fallbackCertGenerator struct {
+	caCert *x509.Certificate
+	caKey  interface{}
+}
+
+func (f *fallbackCertGenerator) GetCACert() *x509.Certificate { return f.caCert }
+func (f *fallbackCertGenerator) GetCAKey() interface{}        { return f.caKey }
+func (f *fallbackCertGenerator) IsCAInstalled() bool          { return true }
+
+func loadFallbackCertGenerator(certDir string) CertGenerator {
+	certPath := filepath.Join(certDir, "ca.crt")
+	keyPath := filepath.Join(certDir, "ca.key")
+
+	certData, err := os.ReadFile(certPath)
+	if err != nil {
+		gasLog.Infof("Fallback: cannot read %s: %v", certPath, err)
+		return nil
+	}
+	block, _ := pem.Decode(certData)
+	if block == nil {
+		gasLog.Infof("Fallback: invalid CA cert PEM")
+		return nil
+	}
+	caCert, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		gasLog.Infof("Fallback: invalid CA cert: %v", err)
+		return nil
+	}
+
+	keyData, err := os.ReadFile(keyPath)
+	if err != nil {
+		gasLog.Infof("Fallback: cannot read %s: %v", keyPath, err)
+		return nil
+	}
+	keyBlock, _ := pem.Decode(keyData)
+	if keyBlock == nil {
+		gasLog.Infof("Fallback: invalid CA key PEM")
+		return nil
+	}
+	var key interface{}
+	if k, err := x509.ParsePKCS1PrivateKey(keyBlock.Bytes); err == nil {
+		key = k
+	} else if k, err := x509.ParsePKCS8PrivateKey(keyBlock.Bytes); err == nil {
+		key = k
+	}
+	if key == nil {
+		gasLog.Infof("Fallback: unsupported CA key format")
+		return nil
+	}
+
+	gasLog.Infof("Fallback: loaded Nova CA \"%s\" from %s", caCert.Subject.CommonName, certDir)
+	return &fallbackCertGenerator{caCert: caCert, caKey: key}
 }
 
 func (m *GASManager) Start() error {
@@ -193,14 +275,26 @@ func (m *GASManager) Start() error {
 
 	if m.config.Running {
 		m.mu.Unlock()
-		log.Printf("[GAS] Start requested but already running")
+		gasLog.Infof("Start requested but already running")
 		return nil
 	}
 
 	if m.config.AuthKey == "" || m.config.AuthKey == "changeme" {
 		m.mu.Unlock()
-		log.Printf("[GAS] Start failed: auth_key not set")
-		return fmt.Errorf("auth_key is not set")
+		gasLog.Errorf("Start failed: auth_key is not set")
+		return fmt.Errorf("auth_key is not set — please enter a valid Auth Key in the Security section")
+	}
+
+	if m.config.GoogleIP == "" {
+		m.mu.Unlock()
+		gasLog.Errorf("Start failed: google_ip is not set")
+		return fmt.Errorf("google_ip is not set — please scan or enter a Google IP address")
+	}
+
+	if m.config.FrontDomain == "" {
+		m.mu.Unlock()
+		gasLog.Errorf("Start failed: front_domain is not set")
+		return fmt.Errorf("front_domain is not set — please enter a front domain (e.g. www.google.com)")
 	}
 
 	ids := m.config.ScriptIDs
@@ -208,13 +302,24 @@ func (m *GASManager) Start() error {
 		scriptID := m.config.ScriptID
 		if scriptID == "" || scriptID == "changeme" {
 			m.mu.Unlock()
-			log.Printf("[GAS] Start failed: script_id not set")
-			return fmt.Errorf("script_id is not set")
+			gasLog.Errorf("Start failed: script_id is not set")
+			return fmt.Errorf("script_id is not set — please enter a valid Script ID in the Script section")
 		}
 		ids = []string{scriptID}
 	}
 
-	m.stopCh = make(chan struct{})
+	// Wait for previous goroutine to fully exit before creating new state
+	oldStopCh := m.stopCh
+	if oldStopCh != nil {
+		select {
+		case <-oldStopCh:
+		case <-time.After(5 * time.Second):
+			gasLog.Warnf("Previous relay goroutine did not exit within 5s")
+		}
+	}
+
+	stopCh := make(chan struct{})
+	m.stopCh = stopCh
 
 	m.config.Running = true
 	m.config.LastGoogleIP = m.config.GoogleIP
@@ -233,14 +338,14 @@ func (m *GASManager) Start() error {
 	m.mu.Unlock()
 
 	if err != nil {
-		log.Printf("[GAS] Start save failed: %v", err)
+		gasLog.Errorf("Start save failed: %v", err)
 		m.mu.Lock()
 		m.config.Running = false
 		m.mu.Unlock()
 		return err
 	}
 
-	log.Printf("[GAS] Starting real proxy: google_ip=%s listen=%s:%d front_domain=%s",
+	gasLog.Infof("Starting real proxy: google_ip=%s listen=%s:%d front_domain=%s",
 		cfg.GoogleIP, cfg.ListenHost, cfg.ListenPort, cfg.FrontDomain)
 
 	gasLogLANAccess(cfg.ListenHost, cfg.ListenPort)
@@ -249,39 +354,103 @@ func (m *GASManager) Start() error {
 	m.cancel = cancel
 
 	m.relay = newGASRelay(cfg)
-	m.proxyServer = newGASProxyServer(cfg, m.relay, m.certGen)
 
-	statsCtx, statsCancel := context.WithCancel(ctx)
-	readyCh := make(chan error, 1)
-	go func() {
-		log.Printf("[GAS] Proxy server goroutine started")
-		if err := m.proxyServer.start(); err != nil {
-			log.Printf("[GAS] Proxy server error: %v", err)
-			readyCh <- err
+	// certGen must never be nil — GAS would generate its own CA, requiring a second root CA install
+	if m.certGen == nil {
+		certDir := filepath.Join(filepath.Dir(filepath.Dir(m.configPath)), "cert")
+		gasLog.Infof("certGen is nil — attempting fallback from %s", certDir)
+		if fallback := loadFallbackCertGenerator(certDir); fallback != nil {
+			m.certGen = fallback
+		} else {
+			gasLog.Warnf("No CertGenerator and no CA on disk at %s!", certDir)
+			gasLog.Warnf("GAS will generate its own CA certificate.")
+			gasLog.Warnf("You MUST install BOTH Nova CA and GAS CA for HTTPS to work!")
 		}
-		statsCancel()
-		close(m.stopCh)
-	}()
-
-	select {
-	case startErr := <-readyCh:
-		m.mu.Lock()
-		m.config.Running = false
-		m.relay = nil
-		m.proxyServer = nil
-		m.mu.Unlock()
-		return fmt.Errorf("gas proxy start failed: %w", startErr)
-	case <-m.proxyServer.started:
-	case <-time.After(5 * time.Second):
-		m.mu.Lock()
-		m.config.Running = false
-		m.mu.Unlock()
-		return fmt.Errorf("gas proxy did not become ready within 5 seconds")
 	}
 
-	statsTicker := time.NewTicker(3 * time.Second)
+	standalone := m.standaloneProxy
+
+	if standalone {
+		m.proxyServer = newGASProxyServer(cfg, m.relay, m.certGen)
+	} else {
+		gasLog.Infof("One-port mode: relay created, no separate proxy server")
+		m.proxyServer = nil
+	}
+
+	wg := &sync.WaitGroup{}
+	m.wg = wg
+
+	statsCtx, statsCancel := context.WithCancel(ctx)
+
+	if standalone && m.proxyServer != nil {
+		readyCh := make(chan error, 1)
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			gasLog.Infof("Proxy server goroutine started")
+			if err := m.proxyServer.start(); err != nil {
+				gasLog.Errorf("Proxy server error: %v", err)
+				readyCh <- err
+			}
+			statsCancel()
+			close(stopCh)
+		}()
+
+		select {
+		case startErr := <-readyCh:
+			cancel()
+			m.mu.Lock()
+			m.config.Running = false
+			if m.relay != nil {
+				m.relay.close()
+			}
+			if m.proxyServer != nil {
+				m.proxyServer.stop()
+			}
+			m.relay = nil
+			m.proxyServer = nil
+			m.cancel = nil
+			m.stopCh = nil
+			m.wg = nil
+			m.mu.Unlock()
+			return fmt.Errorf("gas proxy start failed: %w", startErr)
+		case <-m.proxyServer.started:
+		case <-time.After(5 * time.Second):
+			cancel()
+			m.mu.Lock()
+			m.config.Running = false
+			if m.relay != nil {
+				m.relay.close()
+			}
+			if m.proxyServer != nil {
+				m.proxyServer.stop()
+			}
+			m.relay = nil
+			m.proxyServer = nil
+			m.cancel = nil
+			m.stopCh = nil
+			m.wg = nil
+			m.mu.Unlock()
+			return fmt.Errorf("gas proxy did not become ready within 5 seconds")
+		}
+	} else {
+		// One-port mode: no proxy server to start, signal ready immediately
+		_ = statsCancel // not called in this path; ctx cancels via m.cancel in Stop()
+		readyCh := make(chan error, 1)
+		readyCh <- nil
+		select {
+		case <-readyCh:
+			close(stopCh)
+		case <-time.After(1 * time.Second):
+			close(stopCh)
+		}
+	}
+
+	statsTicker := time.NewTicker(10 * time.Second)
 	m.statsTicker = statsTicker
+	wg.Add(1)
 	go func() {
+		defer wg.Done()
 		defer statsTicker.Stop()
 		for {
 			select {
@@ -300,7 +469,9 @@ func (m *GASManager) Start() error {
 		if failInterval < 10*time.Second {
 			failInterval = 60 * time.Second
 		}
+		wg.Add(1)
 		go func() {
+			defer wg.Done()
 			fticker := time.NewTicker(failInterval)
 			defer fticker.Stop()
 			for {
@@ -316,12 +487,11 @@ func (m *GASManager) Start() error {
 						continue
 					}
 					if m.relay != nil && m.relay.relayFail >= failThreshold {
-						log.Printf("[GAS-FAILOVER] Relay failures (%d) >= threshold (%d), switching IP...",
+						gasLog.Warnf("Relay failures (%d) >= threshold (%d), switching IP...",
 							m.relay.relayFail, failThreshold)
 						m.ScanGoogleIPs()
 						if m.relay != nil {
-							m.relay.relayFail = 0
-							m.relay.resetH2()
+							m.relay.restart()
 						}
 					}
 				}
@@ -336,7 +506,9 @@ func (m *GASManager) Start() error {
 		if rotInterval < 30*time.Second {
 			rotInterval = 300 * time.Second
 		}
+		wg.Add(1)
 		go func() {
+			defer wg.Done()
 			rticker := time.NewTicker(rotInterval)
 			defer rticker.Stop()
 			for {
@@ -358,7 +530,7 @@ func (m *GASManager) Start() error {
 						if next != current {
 							m.config.FrontDomain = next
 							m.saveConfigLocked()
-							log.Printf("[GAS-ROTATE] Front domain rotated: %s -> %s", current, next)
+							gasLog.Infof("Front domain rotated: %s -> %s", current, next)
 						}
 					}
 					m.mu.Unlock()
@@ -413,7 +585,7 @@ func (m *GASManager) Stop() error {
 
 	if !m.config.Running {
 		m.mu.Unlock()
-		log.Printf("[GAS] Stop requested but not running")
+		gasLog.Infof("Stop requested but not running")
 		return nil
 	}
 
@@ -427,9 +599,21 @@ func (m *GASManager) Stop() error {
 	ticker := m.statsTicker
 	failoverStop := m.failoverStop
 	rotateStop := m.rotateStop
+
+	wg := m.wg
+
+	// Nil out immediately under lock to prevent new requests from reaching relay
+	m.relay = nil
+	m.proxyServer = nil
+	m.cancel = nil
+	m.statsTicker = nil
+	m.failoverStop = nil
+	m.rotateStop = nil
+	m.stopCh = nil
+	m.wg = nil
 	m.mu.Unlock()
 
-	// Cancel context first so collectStats() goroutine stops before we nil the fields
+	// Cancel context first so collectStats() goroutine stops
 	if cancel != nil {
 		cancel()
 	}
@@ -454,23 +638,26 @@ func (m *GASManager) Stop() error {
 		close(rotateStop)
 	}
 
-	// Now safe to nil out — all goroutines should have stopped
-	m.mu.Lock()
-	m.relay = nil
-	m.proxyServer = nil
-	m.cancel = nil
-	m.statsTicker = nil
-	m.failoverStop = nil
-	m.rotateStop = nil
-	m.mu.Unlock()
+	// Wait for all goroutines with timeout via context
+	if wg != nil {
+		waitCtx, waitCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer waitCancel()
 
-	select {
-	case <-m.stopCh:
-	case <-time.After(5 * time.Second):
-		log.Printf("[GAS] Stop wait timeout")
+		done := make(chan struct{}, 1)
+		go func() {
+			wg.Wait()
+			close(done)
+		}()
+
+		select {
+		case <-done:
+			gasLog.Infof("All goroutines stopped cleanly")
+		case <-waitCtx.Done():
+			gasLog.Warnf("Stop wait timeout — goroutines still running")
+		}
 	}
 
-	log.Printf("[GAS] Proxy stopped")
+	gasLog.Infof("Proxy stopped")
 	return err
 }
 
@@ -489,7 +676,7 @@ func (m *GASManager) IsRunning() bool {
 
 
 func (m *GASManager) ScanGoogleIPs() []GoogleIPResult {
-	log.Printf("[GAS] Starting hybrid Google IP scan (CandidateIPs + DNS)...")
+	gasLog.Infof("Starting hybrid Google IP scan (CandidateIPs + DNS)...")
 	frontDomain := m.config.FrontDomain
 	if frontDomain == "" {
 		frontDomain = "www.google.com"
@@ -501,8 +688,14 @@ func (m *GASManager) ScanGoogleIPs() []GoogleIPResult {
 	sortResults(results)
 
 	if len(results) > 0 {
+		// Log top 3 results
+		gasLog.Infof("Top 3 fastest IPs:")
+		for i := 0; i < len(results) && i < 3; i++ {
+			gasLog.Infof("  %d) %s (%dms) — %s", i+1, results[i].IP, results[i].Latency, results[i].Domain)
+		}
+
 		best := results[0]
-		log.Printf("[GAS] Scan complete: %d IPs found, best: %s (%dms)",
+		gasLog.Infof("Scan complete: %d IPs found, best: %s (%dms)",
 			len(results), best.IP, best.Latency)
 
 		m.mu.Lock()
@@ -511,14 +704,14 @@ func (m *GASManager) ScanGoogleIPs() []GoogleIPResult {
 		m.saveConfigLocked()
 		m.mu.Unlock()
 	} else {
-		log.Printf("[GAS] Scan complete: no reachable Google IPs found")
+		gasLog.Infof("Scan complete: no reachable Google IPs found")
 	}
 
 	return results
 }
 
 func gasProbeCandidateIPs(frontDomain string) []GoogleIPResult {
-	log.Printf("[GAS] Probing %d CandidateIPs (static Google IP list)...", len(gasCandidateIPs))
+	gasLog.Infof("Probing %d CandidateIPs (static Google IP list)...", len(gasCandidateIPs))
 	type probeResult struct {
 		result  GoogleIPResult
 		latency int64
@@ -556,12 +749,12 @@ func gasProbeCandidateIPs(frontDomain string) []GoogleIPResult {
 		}
 	}
 
-	log.Printf("[GAS] CandidateIPs scan: %d/%d reachable", len(results), len(gasCandidateIPs))
+	gasLog.Infof("CandidateIPs scan: %d/%d reachable", len(results), len(gasCandidateIPs))
 	return results
 }
 
 func gasProbeDNSIPs(frontDomain string, domains []string) []GoogleIPResult {
-	log.Printf("[GAS] Probing DNS-discovered IPs from %d domains...", len(domains))
+	gasLog.Infof("Probing DNS-discovered IPs from %d domains...", len(domains))
 	resolver := &net.Resolver{}
 	seen := map[string]bool{}
 	var results []GoogleIPResult
@@ -593,7 +786,7 @@ func gasProbeDNSIPs(frontDomain string, domains []string) []GoogleIPResult {
 		}
 	}
 
-	log.Printf("[GAS] DNS scan: %d reachable IPs found", len(results))
+	gasLog.Infof("DNS scan: %d reachable IPs found", len(results))
 	return results
 }
 
@@ -651,12 +844,12 @@ func (m *GASManager) TestConnection() (int64, error) {
 	defer cancel()
 	conn, err := (&net.Dialer{}).DialContext(ctx, "tcp", addr)
 	if err != nil {
-		log.Printf("[GAS] Connection test to %s failed: %v", addr, err)
+		gasLog.Errorf("Connection test to %s failed: %v", addr, err)
 		return 0, fmt.Errorf("gas not reachable at %s: %v", addr, err)
 	}
 	conn.Close()
 	latency := time.Since(start).Milliseconds()
-	log.Printf("[GAS] Connection test to %s succeeded: %dms", addr, latency)
+	gasLog.Infof("Connection test to %s succeeded: %dms", addr, latency)
 	return latency, nil
 }
 
@@ -711,7 +904,7 @@ func (m *GASManager) TestRelay(cfg GASConfig) GASTestResult {
 	result.Success = true
 	result.GoogleIP = googleIP
 	result.FrontDomain = frontDomain
-	log.Printf("[GAS] Relay test OK: %s (SNI: %s) tcp=%dms tls=%dms", googleIP, frontDomain, tcpLatency, tlsLatency)
+	gasLog.Infof("Relay test OK: %s (SNI: %s) tcp=%dms tls=%dms", googleIP, frontDomain, tcpLatency, tlsLatency)
 	return result
 }
 
@@ -781,7 +974,7 @@ func (m *GASManager) RunSpeedTest() SpeedTestResult {
 
 	// Fallback: if proxy failed, try direct connection
 	if client == nil {
-		log.Printf("[GAS-SPEEDTEST] Proxy latency check failed (%v), falling back to direct transport", latencyErr)
+		gasLog.Warnf("Proxy latency check failed (%v), falling back to direct transport", latencyErr)
 		directTransport := &http.Transport{
 			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
 		}
@@ -861,6 +1054,12 @@ func (m *GASManager) RunSpeedTest() SpeedTestResult {
 		result.LatencyMs = measuredLatency
 	}
 	return result
+}
+
+// NewGASRelay creates a new gasRelay from the given config.
+// This is used by the core subprocess to create its own relay when GAS is active.
+func NewGASRelay(cfg GASConfig) *gasRelay {
+	return newGASRelay(cfg)
 }
 
 // IsAppProxied checks if an application should be routed through the proxy
