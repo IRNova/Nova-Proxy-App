@@ -375,3 +375,10 @@ This software is provided for educational, research, and testing purposes only.
 ## Stargazers over time
 
 [![Stargazers over time](https://starchart.cc/IRNova/Nova-Proxy-App.svg?variant=adaptive)](https://starchart.cc/IRNova/Nova-Proxy-App)
+---
+
+<div align="center">
+
+Built by <a href="https://github.com/iiviirv"><b>@iiviirv</b></a> for the Nova Proxy Group.
+
+</div>
