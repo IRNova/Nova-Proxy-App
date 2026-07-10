@@ -387,4 +387,11 @@ Nova تنها یک کپی ساده نیست و قابلیت‌های پیشرف�
 
 ## Stargazers over time
 
-[![Stargazers over time](https://starchart.cc/IRNova/Nova-Proxy-App.svg?variant=adaptive)](https://starchart.cc/IRNova/Nova-Proxy-App)
+[![Stargazers over time](https://starchart.cc/IRNova/Nova-Proxy-App.svg?variant=adaptive)](https://starchart.cc/IRNova/Nova-Proxy-App)
+---
+
+<div align="center">
+
+ساخته شده توسط <a href="https://github.com/iiviirv"><b>@iiviirv</b></a> برای گروه نوا پروکسی.
+
+</div>
