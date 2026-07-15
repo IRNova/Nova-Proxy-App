@@ -1,0 +1,33 @@
+# Sensitive / local config
+*.token
+*.key
+*.pem
+*.crt
+credentials*
+secret*
+.env
+
+# Build artifacts
+*.exe
+*.syso
+*.rc
+build/
+dist/
+out/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Go
+vendor/
+
+# Local dev notes
+local_config.md
+*.local.*
