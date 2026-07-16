@@ -14,6 +14,8 @@ import (
 	"novaproxy/proxy"
 )
 
+
+
 type coreClient struct{}
 
 func newCoreClient() *coreClient {
@@ -316,7 +318,7 @@ func (c *coreClient) V2RayAddConfig(link string) (*proxy.V2RayConfig, error) {
 		return nil, err
 	}
 	if reply.Error != "" {
-		return nil, fmt.Errorf(reply.Error)
+		return nil, errors.New(reply.Error)
 	}
 	return reply.Config, nil
 }

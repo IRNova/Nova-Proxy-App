@@ -196,9 +196,26 @@ func parseVLESS(link string) (*V2RayConfig, error) {
 	}
 
 	q := u.Query()
+
+	// Detect REALITY
+	sec := q.Get("security")
+	if sec == "reality" {
+		cfg.Security = "reality"
+	} else {
+		cfg.Security = q.Get("security")
+	}
+
 	cfg.Encryption = q.Get("encryption")
-	cfg.Security = q.Get("security")
-	cfg.Type = q.Get("type")
+
+	// Normalize transport type
+	transType := q.Get("type")
+	switch transType {
+	case "splithttp":
+		cfg.Type = "xhttp"
+	default:
+		cfg.Type = transType
+	}
+
 	cfg.Host = q.Get("host")
 	cfg.Path = q.Get("path")
 	cfg.TLS = q.Get("tls")
@@ -209,6 +226,13 @@ func parseVLESS(link string) (*V2RayConfig, error) {
 	cfg.PublicKey = q.Get("pbk")
 	cfg.ShortID = q.Get("sid")
 	cfg.Group = q.Get("group")
+
+	// XHTTP specific parameters
+	if cfg.Type == "xhttp" {
+		if mode := q.Get("mode"); mode != "" {
+			cfg.ObfsType = mode // reuse ObfsType for xhttp mode
+		}
+	}
 
 	if cfg.Name == "" {
 		cfg.Name = fmt.Sprintf("%s:%s", cfg.Server, cfg.Port)

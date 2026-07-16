@@ -95,6 +95,9 @@ type ProxyServer struct {
 
 	// Process monitor for tracking connected apps
 	procMonitor *ProcessMonitor
+
+	// Admin web panel
+	admin *AdminServer
 }
 
 func (p *ProxyServer) SetV2RayPort(socksPort int) {
@@ -1075,6 +1078,7 @@ func NewProxyServer(addr string) *ProxyServer {
 	}
 	p.dohResolver = NewFailoverResolver(p)
 	p.rules = NewRuleManager("", "")
+	p.admin = NewAdminServer(p)
 	return p
 }
 
@@ -1224,6 +1228,10 @@ func (p *ProxyServer) UpdateECHProfileConfig(profileID string, configBytes []byt
 	_ = p.rules.UpdateECHProfileConfig(profileID, configBytes)
 }
 
+func (p *ProxyServer) Admin() *AdminServer {
+	return p.admin
+}
+
 func (p *ProxyServer) SetMode(mode string) error {
 	mode = strings.ToLower(strings.TrimSpace(mode))
 	if mode != "mitm" && mode != "transparent" && mode != "tls-rf" && mode != "quic" && mode != "gas" && mode != "v2ray" && mode != "rule" {
@@ -1371,6 +1379,19 @@ func (p *ProxyServer) handleRequest(w http.ResponseWriter, req *http.Request) {
 	if host == "" {
 		host = req.URL.Host
 	}
+
+	if req.URL.Path == "/__novaproxy_favicon__" || req.URL.Path == "/favicon.ico" {
+		w.Header().Set("Content-Type", FaviconMIME)
+		w.Header().Set("Cache-Control", "public, max-age=86400")
+		w.Write(AppIcon)
+		return
+	}
+
+	if strings.HasPrefix(req.URL.Path, "/__nova") {
+		p.admin.Handle(w, req)
+		return
+	}
+
 	matchHost := normalizeHost(host)
 	mode := p.GetMode()
 	rule := p.rules.matchRule(matchHost, mode)

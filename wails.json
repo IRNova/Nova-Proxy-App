@@ -11,5 +11,6 @@
   "author": {
     "name": "gamelatest",
     "email": "gamelatest@example.com"
-  }
+  },
+  "icon": "assets/icon.png"
 }

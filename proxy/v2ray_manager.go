@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"bufio"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -10,6 +11,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strconv"
@@ -22,6 +24,8 @@ import (
 	"github.com/v2fly/v2ray-core/v5/infra/conf/serial"
 	"golang.org/x/net/proxy"
 )
+
+var _ = bufio.NewReader // keep import
 
 type V2RaySettings struct {
 	CorePort     int    `json:"core_port"`
@@ -40,6 +44,14 @@ type V2RaySettings struct {
 	SNIOverride  string `json:"sni_override"`
 }
 
+type CoreBackend int
+
+const (
+	CoreBackendV2FlyInProcess CoreBackend = iota
+	CoreBackendXraySubprocess
+	CoreBackendSingBoxSubprocess
+)
+
 type V2RayManager struct {
 	mu           sync.RWMutex
 	store        V2RayConfigStore
@@ -49,6 +61,12 @@ type V2RayManager struct {
 	corePort     int
 	logFn        func(string)
 	coreInstance core.Server
+
+	// Subprocess core support
+	coreBackend   CoreBackend
+	xrayCmd       *exec.Cmd
+	xrayPath      string
+	coreManager   *CoreManager
 }
 
 func NewV2RayManager(dataDir string, logFn func(string)) *V2RayManager {
@@ -191,6 +209,12 @@ func (m *V2RayManager) StartCore() error {
 	m.log("StartCore: starting with config %q (protocol=%s, server=%s, port=%s, transport=%s, tls=%s)",
 		cfg.Name, cfg.Protocol, cfg.Server, cfg.Port, cfg.Type, cfg.TLS)
 
+	// Use Xray subprocess for REALITY or XHTTP
+	useXray := cfg.Security == "reality" || cfg.Type == "xhttp" || cfg.Type == "splithttp"
+	if useXray {
+		return m.startXrayCore(cfg, port)
+	}
+
 	// Stop any existing core instance
 	m.mu.Lock()
 	if m.coreInstance != nil {
@@ -200,69 +224,153 @@ func (m *V2RayManager) StartCore() error {
 	}
 	m.mu.Unlock()
 
+	return m.startV2FlyCore(cfg, port)
+}
+
+func (m *V2RayManager) startV2FlyCore(cfg *V2RayConfig, port int) error {
 	// Generate V2Ray JSON config string
 	configJSON, err := m.GenerateCoreJSON(*cfg)
 	if err != nil {
-		m.log("StartCore: generate config failed: %v", err)
+		m.log("startV2FlyCore: generate config failed: %v", err)
 		return fmt.Errorf("generate config: %w", err)
 	}
-	m.log("StartCore: generated JSON config (%d bytes)", len(configJSON))
+	m.log("startV2FlyCore: generated JSON config (%d bytes)", len(configJSON))
 
-	// Use v2ray-core's JSON config decoder to parse the config
-	m.log("StartCore: parsing JSON config for %q", cfg.Name)
+	m.log("startV2FlyCore: parsing JSON config for %q", cfg.Name)
 	pbConfig, err := serial.LoadJSONConfig(strings.NewReader(configJSON))
 	if err != nil {
-		m.log("StartCore: parse config failed: %v", err)
+		m.log("startV2FlyCore: parse config failed: %v", err)
 		return fmt.Errorf("parse v2ray config: %w", err)
 	}
-	m.log("StartCore: JSON config parsed to protobuf successfully")
 
-	// Create the V2Ray instance
-	m.log("StartCore: creating v2ray instance")
+	m.log("startV2FlyCore: creating v2ray instance")
 	instance, err := core.New(pbConfig)
 	if err != nil {
-		m.log("StartCore: create instance failed: %v", err)
+		m.log("startV2FlyCore: create instance failed: %v", err)
 		return fmt.Errorf("create v2ray instance: %w", err)
 	}
-	m.log("StartCore: instance created successfully")
 
-	// Start the instance
-	m.log("StartCore: starting v2ray instance (socks=127.0.0.1:%d, http=127.0.0.1:%d)", port, port+1)
+	m.log("startV2FlyCore: starting v2ray instance (socks=127.0.0.1:%d, http=127.0.0.1:%d)", port, port+1)
 	if err := instance.Start(); err != nil {
-		m.log("StartCore: instance start failed: %v", err)
+		m.log("startV2FlyCore: instance start failed: %v", err)
 		return fmt.Errorf("start v2ray instance: %w", err)
 	}
-	m.log("StartCore: instance started successfully")
 
 	m.mu.Lock()
 	m.coreInstance = instance
 	m.corePort = port
+	m.coreBackend = CoreBackendV2FlyInProcess
 	m.mu.Unlock()
 
 	m.SetCoreRunning(true)
-	m.log("StartCore: V2Ray core is now running (port %d, config=%q)", port, cfg.Name)
+	m.log("startV2FlyCore: V2Ray core is now running (port %d, config=%q)", port, cfg.Name)
 	return nil
+}
+
+func (m *V2RayManager) startXrayCore(cfg *V2RayConfig, port int) error {
+	// Ensure Xray binary
+	if m.coreManager == nil {
+		m.coreManager = NewCoreManager(filepath.Dir(m.storePath))
+	}
+	xrayPath, err := m.coreManager.EnsureXrayCore()
+	if err != nil {
+		m.log("startXrayCore: download failed: %v", err)
+		return fmt.Errorf("xray core download: %w", err)
+	}
+
+	// Generate Xray-compatible JSON config
+	configJSON, err := GenerateXrayCoreJSON(*cfg, port, port+1)
+	if err != nil {
+		m.log("startXrayCore: generate config failed: %v", err)
+		return fmt.Errorf("generate xray config: %w", err)
+	}
+
+	// Write config to temp file
+	configPath := filepath.Join(os.TempDir(), "novaproxy_xray_config.json")
+	if err := os.WriteFile(configPath, []byte(configJSON), 0644); err != nil {
+		return fmt.Errorf("write xray config: %w", err)
+	}
+
+	// Stop existing Xray process
+	m.stopXrayProcess()
+
+	// Start Xray as subprocess
+	cmd := exec.Command(xrayPath, "run", "-c", configPath)
+	cmd.Env = append(os.Environ(), "XRAY_LOCATION_ASSET="+filepath.Dir(xrayPath))
+
+	stdout, err := cmd.StdoutPipe()
+	if err == nil {
+		go func() {
+			scanner := bufio.NewScanner(stdout)
+			for scanner.Scan() {
+				m.log("[xray] %s", scanner.Text())
+			}
+		}()
+	}
+	stderr, err := cmd.StderrPipe()
+	if err == nil {
+		go func() {
+			scanner := bufio.NewScanner(stderr)
+			for scanner.Scan() {
+				m.log("[xray] %s", scanner.Text())
+			}
+		}()
+	}
+
+	if err := cmd.Start(); err != nil {
+		m.log("startXrayCore: start failed: %v", err)
+		return fmt.Errorf("start xray process: %w", err)
+	}
+
+	m.mu.Lock()
+	m.xrayCmd = cmd
+	m.xrayPath = xrayPath
+	m.corePort = port
+	m.coreBackend = CoreBackendXraySubprocess
+	m.mu.Unlock()
+
+	// Wait a bit for the core to start
+	time.Sleep(500 * time.Millisecond)
+
+	m.SetCoreRunning(true)
+	m.log("startXrayCore: Xray-core started (pid=%d, port=%d, config=%q)", cmd.Process.Pid, port, cfg.Name)
+	return nil
+}
+
+func (m *V2RayManager) stopXrayProcess() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if m.xrayCmd != nil && m.xrayCmd.Process != nil {
+		m.log("stopXrayProcess: stopping xray (pid=%d)", m.xrayCmd.Process.Pid)
+		m.xrayCmd.Process.Kill()
+		m.xrayCmd.Wait()
+		m.xrayCmd = nil
+	}
 }
 
 func (m *V2RayManager) StopCore() error {
 	m.mu.Lock()
-	defer m.mu.Unlock()
+	backend := m.coreBackend
+	m.mu.Unlock()
 
-	if m.coreInstance == nil {
-		m.log("StopCore: no running instance to stop")
-		m.SetCoreRunning(false)
-		return nil
+	switch backend {
+	case CoreBackendXraySubprocess:
+		m.stopXrayProcess()
+	case CoreBackendSingBoxSubprocess:
+		m.stopXrayProcess() // same mechanism
+	default:
+		m.mu.Lock()
+		if m.coreInstance != nil {
+			m.log("StopCore: closing v2ray instance")
+			m.coreInstance.Close()
+			m.coreInstance = nil
+		}
+		m.mu.Unlock()
 	}
-
-	m.log("StopCore: closing v2ray instance")
-	if err := m.coreInstance.Close(); err != nil {
-		m.log("StopCore: close error: %v", err)
-		return fmt.Errorf("stop v2ray instance: %w", err)
-	}
-	m.coreInstance = nil
 
 	m.SetCoreRunning(false)
-	m.log("StopCore: V2Ray core stopped successfully")
+	m.log("StopCore: core stopped successfully")
 	return nil
 }
 
@@ -1399,6 +1507,18 @@ func (m *V2RayManager) GenerateCoreJSON(cfg V2RayConfig) (string, error) {
 			case "quic":
 				quicSettings := map[string]interface{}{}
 				streamSettings["quicSettings"] = quicSettings
+			case "xhttp", "splithttp":
+				// v2fly doesn't support XHTTP directly, but we keep the config for Xray
+				xhttpSettings := map[string]interface{}{
+					"mode": "auto",
+				}
+				if cfg.Path != "" {
+					xhttpSettings["path"] = cfg.Path
+				}
+				if cfg.Host != "" {
+					xhttpSettings["host"] = cfg.Host
+				}
+				streamSettings["xhttpSettings"] = xhttpSettings
 			}
 		}
 

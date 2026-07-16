@@ -203,6 +203,7 @@ func (p *ProxyServer) generateHTML(lang, title, analysis, suggest string, ctx Er
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
 	<title>NovaProxy Diagnostic</title>
+    <link rel="icon" type="image/x-icon" href="/__novaproxy_favicon__">
     <style>
         :root {
             --bg: #0a0a0a;

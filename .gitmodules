@@ -1,0 +1,3 @@
+[submodule "dns-tunnel"]
+	path = dns-tunnel
+	url = https://github.com/TheCanniball/MasterDnsVPN.git

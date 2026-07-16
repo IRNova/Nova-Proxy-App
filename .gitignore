@@ -1,33 +1,43 @@
-# Sensitive / local config
-*.token
-*.key
-*.pem
-*.crt
-credentials*
-secret*
-.env
-
-# Build artifacts
+# Binaries
 *.exe
-*.syso
-*.rc
-build/
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+
+# Build
 dist/
-out/
+build/
+vendor/
+
+# Data (runtime)
+data/config/*
+data/rules/*
+data/cert/*
+data/logs/*
+!data/config/.gitkeep
+!data/rules/.gitkeep
+!data/cert/.gitkeep
+!data/logs/.gitkeep
+
+# Logs
+*.log
 
 # IDE
-.idea/
 .vscode/
+.idea/
 *.swp
 *.swo
+*~
 
 # OS
 .DS_Store
 Thumbs.db
 
-# Go
-vendor/
+# Tools
+tools/icogen/icogen.exe
 
-# Local dev notes
-local_config.md
-*.local.*
+# Local config
+deploy-config.json
