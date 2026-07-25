@@ -398,7 +398,7 @@ This software is provided for educational, research, and testing purposes only.
 
 ## Stargazers over time
 
-[![Stargazers over time](https://starchart.cc/IRNova/Nova-Proxy-App.svg?variant=adaptive)](https://starchart.cc/IRNova/Nova-Proxy-App)
+[See our star history](https://star-history.com/#IRNova/Nova-Proxy-App&Date)
 ---
 
 <div align="center">
