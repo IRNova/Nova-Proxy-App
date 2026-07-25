@@ -1,9 +1,6 @@
-<div align="center">
-  <img src="https://raw.githubusercontent.com/IRNova/Nova-Proxy-App/main/logo.svg" width="120" height="120" alt="NovaProxy Logo">
-  <h1>NovaProxy</h1>
-  <p><strong>Cloudflare IP Shaper — Domain Fronting Proxy with MITM + GSA Relay Engines</strong></p>
-  <p>عبور از فیلترینگ هوشمند با دامنه‌فرانتینگ مبتنی بر Google Apps Script و Cloudflare Worker</p>
-</div>
+<p align="center">
+  <img src="assets/readme/hero-fa.svg" width="100%" alt="نوا پروکسی، آی‌پی شیپر کلودفلر و پروکسی دامنه‌فرانتینگ با دو موتور MITM و GSA Relay">
+</p>
 
 <p align="center">
   <a href="https://github.com/IRNova/Nova-Proxy-App/blob/main/README.en.md">🇬🇧 English Version</a>
@@ -12,8 +9,11 @@
 ---
 
 <a name="fa"></a>
+<a id="معرفی"></a>
 
-## معرفی
+<p align="center">
+  <img src="assets/readme/fa-intro.svg" width="100%" alt="بخش معرفی: نوا پروکسی چیست و دو موتور چگونه کنار هم کار می‌کنند">
+</p>
 
 NovaProxy یک پروکسی دسکتاپ (Wails v3 / Go) است که ترافیک اینترنت را از طریق زیرساخت Google و Cloudflare عبور می‌دهد. از دید سیستم DPI، همه ترافیک شبیه ارتباط عادی با `www.google.com` است، در حالی که درخواست واقعی به هر سایتی ارسال می‌شود.
 
@@ -26,10 +26,11 @@ NovaProxy یک پروکسی دسکتاپ (Wails v3 / Go) است که ترافی�
 
 ---
 
+<a id="mitm-engine"></a>
 
-
-
-## MITM Engine
+<p align="center">
+  <img src="assets/readme/banner-mitm.svg" width="100%" alt="MITM Engine: خاتمه TLS، گواهی‌سازی داینامیک ECDSA، جعل SNI و fragmentation">
+</p>
 
 هسته MITM وظیفه **خاتمه TLS و بازرمزگذاری** را بر عهده دارد تا ترافیک HTTPS قابل بازرسی و مسیریابی باشد.
 
@@ -105,7 +106,11 @@ proxy/
 
 ---
 
-## GSA Relay Engine
+<a id="gsa-relay-engine"></a>
+
+<p align="center">
+  <img src="assets/readme/banner-gsa.svg" width="100%" alt="GSA Relay Engine: رله ترافیک از Google Apps Script به Cloudflare Worker با H2 multiplexing و domain fronting">
+</p>
 
 هسته GSA ترافیک را از طریق **زیرساخت Google** با تکنیک Domain Fronting رله می‌کند. از دید فیلترینگ، همه ترافیک به نظر `www.google.com` می‌رسد.
 
@@ -224,7 +229,11 @@ server/
 
 ---
 
-## راه‌اندازی سرور
+<a id="راهاندازی-سرور"></a>
+
+<p align="center">
+  <img src="assets/readme/fa-server.svg" width="100%" alt="بخش راه‌اندازی سرور: استقرار کلودفلر ورکر و رله گوگل اپس اسکریپت">
+</p>
 
 ### ۱. Cloudflare Worker
 
@@ -272,19 +281,19 @@ const WORKER_URL = "https://my-nova-relay.yourname.workers.dev";
 
 ### ۳. آموزش استفاده از نرم‌افزار
 
-#### مرحله اول — راه‌اندازی اولیه
+#### مرحله اول، راه‌اندازی اولیه
 
 .
 فایل `novaproxy.exe` را با دو کلیک باز کنید.
 .
-صفحه خوش‌آمدگویی نمایش داده می‌شود. یک **پاپ‌آپ** برای نصب گواهی (Certificate) مربوط به دو قابلیت نمایش داده می‌شود — آن را نصب کنید.
+صفحه خوش‌آمدگویی نمایش داده می‌شود. یک **پاپ‌آپ** برای نصب گواهی (Certificate) مربوط به دو قابلیت نمایش داده می‌شود، آن را نصب کنید.
 .
 بعد از نصب گواهی:
    - **کشور** را روی **Iran** قرار دهید.
    - **زبان** و **تم** مورد نظر را انتخاب کنید.
    - دکمه **Start** را بزنید.
 
-#### بدون GSA — فقط MITM
+#### بدون GSA، فقط MITM
 
 اگر فقط دکمه Start را بزنید و قابلیت **Google Apps Script** را فعال نکنید:
 - پروکسی و پروکسی سیستم روشن می‌شود.
@@ -318,20 +327,28 @@ const WORKER_URL = "https://my-nova-relay.yourname.workers.dev";
 .
 **کلید GSA** را روشن کنید.
 
-حالا می‌توانید از مرورگر همه سایت‌ها را باز کنید — حتی **تلگرام وب** به خوبی کار می‌کند.
+حالا می‌توانید از مرورگر همه سایت‌ها را باز کنید، حتی **تلگرام وب** به خوبی کار می‌کند.
 
 > **توجه:** در حال حاضر برنامه‌های دسکتاپ مثل تلگرام ویندوز از داخل خود سیستمعامل از طریق GSA قابل استفاده نیستند، اما همه سایت‌ها در مرورگر به خوبی باز می‌شوند.
 
 ---
 
-## پیش‌نیازها
+<a id="پیشنیازها"></a>
+
+<p align="center">
+  <img src="assets/readme/fa-prereq.svg" width="100%" alt="بخش پیش‌نیازها: حساب‌هایی که پیش از شروع لازم دارید">
+</p>
 
 - حساب Google (برای Apps Script)
 - حساب Cloudflare (برای Worker)
 
 ---
 
-## قدردانی
+<a id="قدردانی"></a>
+
+<p align="center">
+  <img src="assets/readme/fa-thanks.svg" width="100%" alt="بخش قدردانی: پروژه‌هایی که این نسخه بر پایه آن‌ها ساخته شده">
+</p>
 
 بخش **GSA** این پروژه بر پایه نسخه اولیه [mhr-cfw-go](https://github.com/denuitt1/mhr-cfw-go) ساخته شده است. از این پروژه به عنوان نقطه شروع برای هسته رله Google Apps Script استفاده شده، اما پس از آن ارتقاهای اساسی پیدا کرده و کلی قابلیت به آن اضافه شده است.
 
@@ -360,7 +377,11 @@ Nova تنها یک کپی ساده نیست و قابلیت‌های پیشرف�
 
 ---
 
-## سلب مسئولیت
+<a id="سلب-مسئولیت"></a>
+
+<p align="center">
+  <img src="assets/readme/fa-disclaimer.svg" width="100%" alt="بخش سلب مسئولیت: فقط برای اهداف آموزشی و تحقیقاتی، بدون ضمانت">
+</p>
 
 این نرم‌افزار فقط برای اهداف آموزشی، تحقیقاتی و تست ارائه شده است.
 
