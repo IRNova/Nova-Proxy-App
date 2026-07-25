@@ -1,9 +1,6 @@
-<div align="center">
-  <img src="https://raw.githubusercontent.com/IRNova/Nova-Proxy-App/main/logo.svg" width="120" height="120" alt="NovaProxy Logo">
-  <h1>NovaProxy</h1>
-  <p><strong>Cloudflare IP Shaper — Domain Fronting Proxy with MITM + GSA Relay Engines</strong></p>
-  <p>Bypass Smart Filtering with Domain Fronting based on Google Apps Script and Cloudflare Worker</p>
-</div>
+<p align="center">
+  <img src="assets/readme/hero-en.svg" width="100%" alt="NovaProxy, a Cloudflare IP shaper and domain-fronting proxy with two engines, MITM and GSA Relay">
+</p>
 
 <p align="center">
   <a href="https://github.com/IRNova/Nova-Proxy-App/blob/main/README.md">🇮🇷 نسخه فارسی</a>
@@ -12,8 +9,11 @@
 ---
 
 <a name="en"></a>
+<a id="introduction"></a>
 
-## Introduction
+<p align="center">
+  <img src="assets/readme/en-intro.svg" width="100%" alt="Introduction: what NovaProxy is and how the two engines fit together">
+</p>
 
 NovaProxy is a desktop proxy (Wails v3 / Go) that routes internet traffic through Google and Cloudflare infrastructure. From the DPI's perspective, all traffic looks like normal communication with `www.google.com`, while actual requests are sent to any target site.
 
@@ -26,7 +26,11 @@ Two main cores:
 
 ---
 
-## MITM Engine
+<a id="mitm-engine"></a>
+
+<p align="center">
+  <img src="assets/readme/banner-mitm.svg" width="100%" alt="MITM Engine: TLS termination, dynamic ECDSA certs, SNI spoofing, fragmentation">
+</p>
 
 The MITM Engine handles **TLS termination and re-encryption**, making HTTPS traffic inspectable and routable.
 
@@ -102,7 +106,11 @@ proxy/
 
 ---
 
-## GSA Relay Engine
+<a id="gsa-relay-engine"></a>
+
+<p align="center">
+  <img src="assets/readme/banner-gsa.svg" width="100%" alt="GSA Relay Engine: relay traffic from Google Apps Script to Cloudflare Worker with H2 multiplexing and domain fronting">
+</p>
 
 The GSA Relay routes traffic through **Google infrastructure** using the Domain Fronting technique. From the DPI's perspective, all traffic appears to be destined for `www.google.com`.
 
@@ -221,7 +229,11 @@ server/
 
 ---
 
-## Server Setup
+<a id="server-setup"></a>
+
+<p align="center">
+  <img src="assets/readme/en-server.svg" width="100%" alt="Server Setup: deploy the Cloudflare Worker and Google Apps Script relay">
+</p>
 
 ### 1. Cloudflare Worker
 
@@ -269,16 +281,16 @@ const WORKER_URL = "https://my-nova-relay.yourname.workers.dev";
 
 ### 3. Usage Tutorial
 
-#### Step 1 — Initial Setup
+#### Step 1: Initial Setup
 
 1. Double-click `novaproxy.exe` to launch.
-2. The welcome screen appears. A **popup** for certificate installation will show — install it.
+2. The welcome screen appears. A **popup** for certificate installation will show, install it.
 3. After installing the certificate:
    - Set **Country** to **Iran**.
    - Choose your preferred **Language** and **Theme**.
    - Click **Start**.
 
-#### Without GSA — MITM Only
+#### Without GSA: MITM Only
 
 If you just click Start without activating the **Google Apps Script** feature:
 - Proxy and system proxy will be enabled.
@@ -305,20 +317,28 @@ Go to the **Dashboard** and follow these steps in order:
 2. Enable **System Proxy**.
 3. Enable **GSA Toggle**.
 
-Now you can browse any site — even **Telegram Web** works perfectly.
+Now you can browse any site, even **Telegram Web** works perfectly.
 
 > **Note:** Desktop apps like Telegram for Windows currently cannot use GSA directly from the OS, but all sites work fine in the browser.
 
 ---
 
-## Prerequisites
+<a id="prerequisites"></a>
+
+<p align="center">
+  <img src="assets/readme/en-prereq.svg" width="100%" alt="Prerequisites: the accounts you need before you start">
+</p>
 
 - Google account (for Apps Script)
 - Cloudflare account (for Worker)
 
 ---
 
-## Acknowledgments
+<a id="acknowledgments"></a>
+
+<p align="center">
+  <img src="assets/readme/en-thanks.svg" width="100%" alt="Acknowledgments: upstream projects this build stands on">
+</p>
 
 The **GSA** section of this project is based on the initial version of [mhr-cfw-go](https://github.com/denuitt1/mhr-cfw-go). This project was used as a starting point for the Google Apps Script relay core, but has since been significantly upgraded with many new features.
 
@@ -339,15 +359,19 @@ Thanks to [SniShaper](https://github.com/SniShaper) for providing this frontend.
 
 ### Key Differences (What Makes Nova Unique)
 
-Nova is not just a simple copy — it has advanced features not found in SniShaper:
+Nova is not just a simple copy, it has advanced features not found in SniShaper:
 
-- **GSA Engine (Google Apps Script):** The most important difference — relays traffic through Google's servers. SniShaper does not have this capability.
+- **GSA Engine (Google Apps Script):** The most important difference, relays traffic through Google's servers. SniShaper does not have this capability.
 - **Custom Optimization:** Nova is specifically optimized for bypassing Iran's internet restrictions, with Cloudflare IP Pool and WARP Masque support.
 - **TUN Mode:** Nova's TUN mode allows managing all OS traffic without manual configuration, unlike SniShaper.
 
 ---
 
-## Disclaimer
+<a id="disclaimer"></a>
+
+<p align="center">
+  <img src="assets/readme/en-disclaimer.svg" width="100%" alt="Disclaimer: educational and research use only, no warranty">
+</p>
 
 This software is provided for educational, research, and testing purposes only.
 
