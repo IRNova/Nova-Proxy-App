@@ -1,0 +1,30 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="138" viewBox="0 0 1200 138" role="img" aria-labelledby="t d" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,'Helvetica Neue',Arial,'Vazirmatn','Noto Sans Arabic',sans-serif">
+<title id="t">راه‌اندازی سرور</title>
+<desc id="d">Section banner: راه‌اندازی سرور. استقرار کلودفلر ورکر و رله گوگل اپس اسکریپت</desc>
+<defs>
+    <linearGradient id="grad" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#22d3ee"/>
+      <stop offset="1" stop-color="#9d4efb"/>
+    </linearGradient>
+    <linearGradient id="gradH" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#22d3ee"/>
+      <stop offset="1" stop-color="#9d4efb"/>
+    </linearGradient>
+    <linearGradient id="panelSheen" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffffff" stop-opacity="0.05"/>
+      <stop offset="1" stop-color="#ffffff" stop-opacity="0"/>
+    </linearGradient>
+    <radialGradient id="glowC" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0" stop-color="#22d3ee" stop-opacity="0.30"/>
+      <stop offset="1" stop-color="#22d3ee" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="glowV" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0" stop-color="#9d4efb" stop-opacity="0.30"/>
+      <stop offset="1" stop-color="#9d4efb" stop-opacity="0"/>
+    </radialGradient>
+    
+  </defs><rect x="1" y="1" width="1198" height="136" rx="18" fill="#12141d" stroke="#242838"/>
+<rect x="1" y="1" width="1198" height="136" rx="18" fill="url(#panelSheen)"/>
+<ellipse cx="120.0" cy="69.0" rx="220" ry="120" fill="url(#glowC)"/>
+<ellipse cx="1080.0" cy="69.0" rx="220" ry="120" fill="url(#glowV)"/>
+<rect x="1154" y="35.0" width="6" height="68" rx="3" fill="url(#grad)"/><g><path d="M 1081 49.46 Q 1081 41.46 1089 37.46 L 1127 37.46 Q 1135 41.46 1135 49.46 L 1135 77.1 Q 1135 88.44 1108 99.24000000000001 Q 1081 88.44 1081 77.1 Z" fill="#161925" stroke="url(#grad)" stroke-width="2.2"/><path d="M 1081 49.46 Q 1081 41.46 1089 37.46 L 1127 37.46 Q 1135 41.46 1135 49.46 L 1135 77.1 Q 1135 88.44 1108 99.24000000000001 Q 1081 88.44 1081 77.1 Z" fill="url(#panelSheen)"/><g stroke="url(#grad)" stroke-width="5.4" stroke-linecap="round" stroke-linejoin="round" fill="none"><path d="M 1093.96 85.74 L 1093.96 52.260000000000005 L 1122.04 85.74 L 1122.04 52.260000000000005"/></g></g><text x="1056" y="65.0" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,'Helvetica Neue',Arial,'Vazirmatn','Noto Sans Arabic',sans-serif" font-size="40" font-weight="800" fill="#eef1f8" text-anchor="end" style="direction:ltr">⁧راه‌اندازی سرور⁩</text><text x="1056" y="99.0" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,'Liberation Mono',monospace" font-size="15" fill="#9aa2b8" text-anchor="end" style="direction:ltr">⁧استقرار کلودفلر ورکر و رله گوگل اپس اسکریپت⁩</text><g transform="translate(440,0) scale(-1,1)"><path d="M 60 69.0 H 380" stroke="url(#gradH)" stroke-width="2" opacity="0.55"/><circle cx="60" cy="69.0" r="4.5" fill="none" stroke="#9aa2b8" stroke-width="1.6"/><g><rect x="130.0" y="58.0" width="52" height="22" rx="11" fill="#161925" stroke="url(#gradH)" stroke-width="1.4"/><path d="M 150.0 64.0 q0 -3.5 3.5 -3.5 q3.5 0 3.5 3.5 v3.5 q0 3.5 -3.5 5 q-3.5 -1.5 -3.5 -5 z" fill="none" stroke="url(#grad)" stroke-width="1.3"/><circle cx="167.0" cy="69.0" r="2.6" fill="url(#grad)"/></g><circle cx="258.4" cy="69.0" r="5.5" fill="#9d4efb"/><circle cx="296.8" cy="69.0" r="5.5" fill="#22d3ee"/><rect x="371" y="63.0" width="12" height="12" rx="2.5" fill="none" stroke="#9aa2b8" stroke-width="1.6"/></g></svg>
