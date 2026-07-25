@@ -408,7 +408,7 @@ Nova تنها یک کپی ساده نیست و قابلیت‌های پیشرف�
 
 ## Stargazers over time
 
-[![Stargazers over time](https://starchart.cc/IRNova/Nova-Proxy-App.svg?variant=adaptive)](https://starchart.cc/IRNova/Nova-Proxy-App)
+[تاریخچهٔ ستاره‌ها را ببینید](https://star-history.com/#IRNova/Nova-Proxy-App&Date)
 ---
 
 <div align="center">
