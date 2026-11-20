@@ -413,6 +413,5 @@ Nova تنها یک کپی ساده نیست و قابلیت‌های پیشرف�
 
 <div align="center">
 
-ساخته شده توسط <a href="https://github.com/iiviirv"><b>@iiviirv</b></a> برای گروه نوا پروکسی.
 
 </div>
