@@ -344,26 +344,21 @@ The **GSA** section of this project is based on the initial version of [mhr-cfw-
 
 Thanks to [denuitt1](https://github.com/denuitt1) for providing this project.
 
-The frontend (UI) of this project is taken from the [SniShaper](https://github.com/SniShaper/SniShaper) project. Note that **SniShaper** is designed to bypass China's internet restrictions, and the MITM and GSA cores of Nova have no codebase relationship or dependency on that project. NovaProxy is specifically developed to bypass internet restrictions in Iran.
+Nova-Proxy-App shares frontend and backend code with historical [SniShaper](https://github.com/SnishaperTeam/SniShaper) revisions published under MIT. Shared backend material includes TLS fragmentation, certificate verification, TUN flow, DNS resolution, and routing helpers. These upstream contributions remain credited alongside Nova's additions.
 
-Thanks to [SniShaper](https://github.com/SniShaper) for providing this frontend.
+See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for preserved copyright and permission notices, and [LICENSING-PROVENANCE.md](LICENSING-PROVENANCE.md) for the source comparisons and unresolved import history. This notice correction does not assign a new license to the entire project or establish that every dependency has been reviewed.
 
-### SniShaper vs NovaProxy Comparison
+Thanks to the SniShaper contributors for the shared frontend and backend work.
 
-| Metric | SniShaper | Nova-Proxy-App |
-|--------|-----------|----------------|
-| **Language** | Go 87%, TypeScript | Go, TypeScript (Wails v3) |
-| **TUN Mode** | No | Yes |
-| **Google Apps Script** | No | Yes (GSA Relay) |
-| **Main Bypass Technique** | ClientHello manipulation | MITM + Domain Fronting (GSA) |
+### Nova additions
 
-### Key Differences (What Makes Nova Unique)
+- **GSA relay:** the Google Apps Script relay is credited separately to mhr-cfw-go above, with subsequent Nova changes.
+- **Iran-focused configuration:** Nova provides configuration and routing choices intended for Iranian networks.
+- **TUN support:** TUN-related code is present in both Nova and the historical SniShaper source; it is not claimed here as an exclusive Nova feature.
 
-Nova is not just a simple copy, it has advanced features not found in SniShaper:
+### License notices
 
-- **GSA Engine (Google Apps Script):** The most important difference, relays traffic through Google's servers. SniShaper does not have this capability.
-- **Custom Optimization:** Nova is specifically optimized for bypassing Iran's internet restrictions, with Cloudflare IP Pool and WARP Masque support.
-- **TUN Mode:** Nova's TUN mode allows managing all OS traffic without manual configuration, unlike SniShaper.
+[LICENSE](LICENSE) preserves the original SniShaper copyright and MIT terms for the identified shared material. Full notices also appear in covered source files and [LICENSES](LICENSES). Source and binary redistributions must retain the applicable notices. See [DISTRIBUTION.md](DISTRIBUTION.md) for the required accompanying files; this targeted correction does not assign one new license to every component.
 
 ---
 
